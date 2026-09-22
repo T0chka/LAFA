@@ -341,3 +341,13 @@ SOURCE=Dec_2025
 ```
 
 Changing `FUTURE` never triggers retraining. Changing `SOURCE` always does.
+
+## Container
+
+Public Docker image: [tochka897/lafa:v1](https://hub.docker.com/r/tochka897/lafa)
+
+Immutable image: `tochka897/lafa@sha256:2331e556d07e331f18efc92ba23dbd9a0a7928e99f1779d338943c21643d0e13`
+
+Precomputed protein embeddings: [AnDolgorukova/lafa-protein-embeddings](https://huggingface.co/datasets/AnDolgorukova/lafa-protein-embeddings).
+
+Runtime mounts, pretrained protein-language-model preparation, and the complete container command are documented in `CONTAINER.md`.

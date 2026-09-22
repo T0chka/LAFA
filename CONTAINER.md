@@ -1,5 +1,9 @@
 # LAFA container runtime
 
+Public image: [tochka897/lafa:v1](https://hub.docker.com/r/tochka897/lafa)
+
+Immutable image: `tochka897/lafa@sha256:2331e556d07e331f18efc92ba23dbd9a0a7928e99f1779d338943c21643d0e13`
+
 The Docker image contains the LAFA code, Python/CUDA dependencies, and BLAST. Large reusable data are mounted separately rather than included in the image.
 
 ## Runtime mounts
@@ -15,7 +19,7 @@ The embedding cache is keyed by protein sequence. Existing embeddings are reused
 
 Public dataset:
 
-`AnDolgorukova/lafa-protein-embeddings`
+[AnDolgorukova/lafa-protein-embeddings](https://huggingface.co/datasets/AnDolgorukova/lafa-protein-embeddings)
 
 Download it without changing its directory layout:
 
@@ -91,7 +95,7 @@ docker run --rm --gpus all \
   -v /path/to/lafa_embeddings:/embeddings \
   -v /path/to/lafa_pretrained:/models:ro \
   -v /path/to/lafa_work:/work \
-  lafa:dev \
+  tochka897/lafa:v1 \
   --query_file /data/test_sequences.fasta \
   --train_sequences /data/train_sequences.fasta \
   --annot_file /data/train_terms.tsv \
