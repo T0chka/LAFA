@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.csr import pack_row_aligned_csr, pack_row_aligned_csr_with_data
+from src.core.debug import print_separator
 from src.core.io import load_terms_df
 from src.core.ontology import (
     OntologyGraph,
@@ -97,7 +98,7 @@ def _effective_train_terms(spec: DatasetSpec) -> Path:
     return spec.train_terms
 
 
-def build_indices(spec: DatasetSpec) -> None:
+def build_indices(spec: DatasetSpec, log_prefix: str = "prepare_data") -> None:
     terms_path = _effective_train_terms(spec)
     terms_df = load_terms_df(terms_path)
     need_ids = set(terms_df["EntryID"].unique().tolist())
@@ -157,13 +158,15 @@ def build_indices(spec: DatasetSpec) -> None:
     test_df.to_parquet(spec.test_index, index=False)
 
     print(
-        f"[prepare] train index: {len(train_df):,} rows, "
-        f"{train_df['seq_key'].nunique():,} unique sequences -> {spec.train_index}"
+        f"[{log_prefix}] train index | proteins={len(train_df):,} | "
+        f"unique sequences={train_df['seq_key'].nunique():,}"
     )
+    print(f"[{log_prefix}] wrote train index: {spec.train_index}")
     print(
-        f"[prepare] test index: {len(test_df):,} rows, "
-        f"{test_df['seq_key'].nunique():,} unique sequences -> {spec.test_index}"
+        f"[{log_prefix}] test index | proteins={len(test_df):,} | "
+        f"unique sequences={test_df['seq_key'].nunique():,}"
     )
+    print(f"[{log_prefix}] wrote test index: {spec.test_index}")
 
 
 def _build_entry_csr(
@@ -240,7 +243,7 @@ def _empty_csr() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     )
 
 
-def build_ground_truth(spec: DatasetSpec) -> None:
+def build_ground_truth(spec: DatasetSpec, log_prefix: str = "prepare_data") -> None:
     gt_terms_df = load_terms_df(_effective_train_terms(spec))
     known_terms_df = load_terms_df(spec.train_terms)
 
@@ -290,7 +293,13 @@ def build_ground_truth(spec: DatasetSpec) -> None:
             edges=obo.edges_by_ns[namespace],
             alt_to_canon=alt_to_canon,
         )
+        original_terms = int(graph.term_ids.size)
         graph = prune_orphans(graph)
+        retained_terms = int(graph.term_ids.size)
+        print(
+            f"[{log_prefix}] ground truth ontology | {aspect} | original terms={original_terms:,} | "
+            f"orphan terms removed={original_terms - retained_terms:,}"
+        )
         term_ids = graph.term_ids.astype(object, copy=False)
 
         ia = np.fromiter(
@@ -424,16 +433,15 @@ def build_ground_truth(spec: DatasetSpec) -> None:
     with spec.ground_truth.open("wb") as handle:
         pickle.dump(prepared, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    print(f"[prepare] wrote: {spec.ground_truth}")
+    print(f"[{log_prefix}] wrote prepared ground truth: {spec.ground_truth}")
     for aspect, data in prepared.items():
         print(
-            f"[prepare] {aspect}: terms={len(data['ontology_term_ids'])} | "
-            f"gt={len(data['gt']['gt_ids'])} | "
-            f"known={len(data['known_terms']['known_ids'])} | "
-            f"not={len(data['not_terms']['not_ids'])} | "
-            f"test_exp={len(data['test_exp']['test_exp_ids'])} | "
-            f"test_nonexp={len(data['test_nonexp']['test_nonexp_ids'])} | "
-            f"nonexp_codes={len(data['nonexp_codes']['nonexp_ids'])}"
+            f"[{log_prefix}] {aspect} | ontology terms={len(data['ontology_term_ids']):,} | "
+            f"train proteins with GO labels={len(data['gt']['gt_ids']):,} | "
+            f"NOT proteins={len(data['not_terms']['not_ids']):,} | "
+            f"test proteins with experimental GOA annotations={len(data['test_exp']['test_exp_ids']):,} | "
+            f"test proteins with non-experimental GOA annotations={len(data['test_nonexp']['test_nonexp_ids']):,} | "
+            f"non-experimental feature proteins={len(data['nonexp_codes']['nonexp_ids']):,}"
         )
 
 
@@ -497,29 +505,29 @@ def _load_prepared_summary(
     summary = {
         "train proteins": int(train_index["EntryID"].nunique()),
         "test proteins": int(test_index["EntryID"].nunique()),
-        "direct protein-GO pairs": int(len(terms[["EntryID", "term"]].drop_duplicates())),
-        "propagated protein-GO pairs": propagated_annotations,
+        "protein-GO rows": int(len(terms)),
+        "propagated protein-GO rows": propagated_annotations,
         "training GO terms": int(terms["term"].nunique()),
         "BPO training GO terms": int(terms.loc[terms["aspect"] == "BPO", "term"].nunique()),
         "CCO training GO terms": int(terms.loc[terms["aspect"] == "CCO", "term"].nunique()),
         "MFO training GO terms": int(terms.loc[terms["aspect"] == "MFO", "term"].nunique()),
         "nonexp proteins": int(len(nonexp_ids)),
-        "nonexp protein-GO pairs": nonexp_annotations,
+        "nonexp protein-GO rows": nonexp_annotations,
     }
     return summary, train_index, test_index
 
 
-def write_snapshot_comparison(spec: DatasetSpec) -> None:
+def write_snapshot_comparison(spec: DatasetSpec, log_prefix: str = "prepare_data") -> None:
     current_dir = spec.prepared_dir.parent
     previous_dir = _find_previous_snapshot(spec)
     if previous_dir is None:
-        print("[prepare] snapshot comparison skipped: no earlier prepared snapshot found")
+        print(f"[{log_prefix}] snapshot comparison skipped: no earlier prepared snapshot found")
         return
 
     previous_terms = spec.train_terms.parent.parent / previous_dir.name / spec.train_terms.name
     if not previous_terms.exists():
         print(
-            f"[prepare] snapshot comparison skipped: previous train terms not found: "
+            f"[{log_prefix}] snapshot comparison skipped: previous train terms not found: "
             f"{previous_terms}"
         )
         return
@@ -583,8 +591,8 @@ def write_snapshot_comparison(spec: DatasetSpec) -> None:
             ("test proteins removed", len(previous_test_ids - current_test_ids)),
             ("shared train proteins with changed sequence", changed_train),
             ("shared test proteins with changed sequence", changed_test),
-            ("direct protein-GO pairs added", len(current_pairs - previous_pairs)),
-            ("direct protein-GO pairs removed", len(previous_pairs - current_pairs)),
+            ("unique protein-GO rows added", len(current_pairs - previous_pairs)),
+            ("unique protein-GO rows removed", len(previous_pairs - current_pairs)),
             ("training GO terms added", len(current_go - previous_go)),
             ("training GO terms removed", len(previous_go - current_go)),
         ],
@@ -604,42 +612,81 @@ def write_snapshot_comparison(spec: DatasetSpec) -> None:
         display[col] = display[col].map(lambda x: f"{int(x):,}")
     display["delta"] = display["delta"].map(lambda x: f"{int(x):+,}")
 
-    print(f"\n=== Snapshot comparison: {previous_dir.name} -> {current_dir.name} ===")
+    print_separator(log_prefix, f"Snapshot comparison: {previous_dir.name} -> {current_dir.name}")
     print(display.to_string(index=False))
-    print("\n=== Snapshot composition changes ===")
+    print(f"[{log_prefix}] snapshot composition changes")
     changes_display = changes.copy()
     changes_display["count"] = changes_display["count"].map(lambda x: f"{int(x):+,}")
     print(changes_display.to_string(index=False))
-    print(f"\n[prepare] wrote: {comparison_path}")
-    print(f"[prepare] wrote: {changes_path}")
+    print(f"[{log_prefix}] wrote: {comparison_path}")
+    print(f"[{log_prefix}] wrote: {changes_path}")
 
 
-def prepare_dataset(spec: DatasetSpec) -> None:
-    print("\n=== Preparing dataset ===")
+def prepare_dataset(spec: DatasetSpec, log_prefix: str = "prepare_data") -> None:
+    snapshot = spec.prepared_dir.parent.name
+    print(f"[{log_prefix}] snapshot={snapshot}")
     spec.prepared_dir.mkdir(parents=True, exist_ok=True)
     spec.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    print_separator(log_prefix, "Information accretion")
     if not spec.ia_file.exists():
-        compute_information_accretion(spec.train_terms, spec.ontology_obo, spec.ia_file)
+        print(f"[{log_prefix}] IA not found; computing from train protein-GO rows and GO ontology")
+        compute_information_accretion(
+            spec.train_terms, spec.ontology_obo, spec.ia_file, log_prefix=log_prefix
+        )
+    else:
+        print(f"[{log_prefix}] using existing IA: {spec.ia_file}")
 
     if spec.use_uniprot:
+        print_separator(log_prefix, "UniProt-GOA auxiliary data")
         if not spec.uniprot_gaf_parquet.exists():
             if spec.uniprot_gaf_gz is None or not spec.uniprot_gaf_gz.exists():
                 raise FileNotFoundError(
                     "UniProt snapshot is missing. Provide either the normalized "
                     "Parquet or the raw .gaf.gz file declared by DatasetSpec."
                 )
-            normalize_gaf(spec.uniprot_gaf_gz, spec.uniprot_gaf_parquet)
-        update_uniprot_annotations(spec)
+            print(f"[{log_prefix}] normalized GAF not found; converting raw UniProt-GOA GAF")
+            normalize_gaf(
+                spec.uniprot_gaf_gz, spec.uniprot_gaf_parquet, log_prefix=log_prefix
+            )
+        else:
+            print(f"[{log_prefix}] using existing normalized GAF: {spec.uniprot_gaf_parquet}")
+        print(f"[{log_prefix}] building snapshot-specific UniProt features for train and test proteins")
+        update_uniprot_annotations(spec, log_prefix=log_prefix)
 
+    print_separator(log_prefix, "Train and test sequence indices")
     if not spec.train_index.exists() or not spec.test_index.exists():
-        build_indices(spec)
+        build_indices(spec, log_prefix=log_prefix)
     else:
-        print("[prepare] train/test indices already exist")
+        print(f"[{log_prefix}] using existing train index: {spec.train_index}")
+        print(f"[{log_prefix}] using existing test index: {spec.test_index}")
 
+    print_separator(log_prefix, "Ontology and training labels")
     if not spec.ground_truth.exists():
-        build_ground_truth(spec)
+        build_ground_truth(spec, log_prefix=log_prefix)
     else:
-        print("[prepare] ground_truth.pkl already exists")
+        print(f"[{log_prefix}] using existing prepared ground truth: {spec.ground_truth}")
 
-    write_snapshot_comparison(spec)
+    print_separator(log_prefix, "Prepared snapshot summary")
+    summary, _, _ = _load_prepared_summary(
+        spec.train_index, spec.test_index, spec.ground_truth, spec.train_terms
+    )
+    print(
+        f"[{log_prefix}] train proteins={summary['train proteins']:,} | "
+        f"test proteins={summary['test proteins']:,}"
+    )
+    print(
+        f"[{log_prefix}] protein-GO rows={summary['protein-GO rows']:,} | "
+        f"propagated protein-GO rows={summary['propagated protein-GO rows']:,}"
+    )
+    print(
+        f"[{log_prefix}] training GO terms={summary['training GO terms']:,} | "
+        f"BPO={summary['BPO training GO terms']:,} | "
+        f"CCO={summary['CCO training GO terms']:,} | "
+        f"MFO={summary['MFO training GO terms']:,}"
+    )
+    print(
+        f"[{log_prefix}] non-experimental proteins={summary['nonexp proteins']:,} | "
+        f"non-experimental protein-GO rows={summary['nonexp protein-GO rows']:,}"
+    )
+    write_snapshot_comparison(spec, log_prefix=log_prefix)

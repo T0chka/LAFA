@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from src.candidates.union import align_state_to_protein_axis, pack_union_dataset
+from src.core.debug import print_separator
 from src.core.io import build_submission_df, load_index_df, load_prepared_gt, save_submit_parquet, save_submit_tsv
 from src.core.postprocess import CSRState, PostprocessConfig, Postprocessor
 from src.data.dataset import DatasetSpec
@@ -144,7 +145,13 @@ def concat_states(states: list[CSRState]) -> CSRState:
     return CSRState(indptr=indptr, indices=indices, scores=scores)
 
 
-def train_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, out_dir: str | Path | None = None, config: LTRConfig | None = None) -> Path:
+def train_ltr(
+    dataset: DatasetSpec,
+    members: list[LTRMember] | None = None,
+    out_dir: str | Path | None = None,
+    config: LTRConfig | None = None,
+    log_prefix: str = "train_ltr",
+) -> Path:
     import xgboost as xgb
 
     config = LTRConfig() if config is None else config
@@ -156,6 +163,9 @@ def train_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, out_
     prepared_gt = load_prepared_gt(dataset.ground_truth)
     post_in = Postprocessor(POSTPROCESS_IN, train_index, prepared_gt)
     post_out = Postprocessor(POSTPROCESS_OUT, train_index, prepared_gt)
+    member_names = ",".join(member.name for member in members)
+    print(f"[{log_prefix}] members={len(members)} ({member_names}) | folds={config.n_folds}")
+
     oof_parts = []
     for aspect, aspect_gt in prepared_gt.items():
         entry_ids = aspect_gt["gt"]["gt_ids"]
@@ -169,35 +179,87 @@ def train_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, out_
         params = dict(config.xgb_params)
         params["eval_metric"] = f"ndcg@{k}"
         params["lambdarank_num_pair_per_sample"] = k
+        context = f"ltr | {aspect}"
+        print_separator(log_prefix, context)
+        print(
+            f"[{log_prefix}] proteins={len(entry_ids):,} | "
+            f"features={len(names):,} | ndcg@{k} | folds={config.n_folds}"
+        )
+
         fold_prots = []
         fold_states = []
+        fold_scores = []
         for fold, (tr, va) in enumerate(_folds(len(axis), config.n_folds, config.fold_seed), start=1):
             tr_groups, tr_x, tr_prots, tr_indptr, tr_terms = packer.pack(axis[tr])
             tr_y = packer.labels(tr_prots, tr_indptr, tr_terms)
-            tr_groups, tr_x, tr_prots, tr_indptr, tr_terms, tr_y = drop_queries_without_signal(tr_groups, tr_x, tr_prots, tr_indptr, tr_terms, tr_y, packer.n_members)
+            tr_groups, tr_x, tr_prots, tr_indptr, tr_terms, tr_y = drop_queries_without_signal(
+                tr_groups, tr_x, tr_prots, tr_indptr, tr_terms, tr_y, packer.n_members
+            )
             va_groups, va_x, va_prots, va_indptr, va_terms = packer.pack(axis[va])
             va_y = packer.labels(va_prots, va_indptr, va_terms)
-            va_groups, va_x, va_prots, va_indptr, va_terms, va_y = drop_queries_without_signal(va_groups, va_x, va_prots, va_indptr, va_terms, va_y, packer.n_members)
+            va_groups, va_x, va_prots, va_indptr, va_terms, va_y = drop_queries_without_signal(
+                va_groups, va_x, va_prots, va_indptr, va_terms, va_y, packer.n_members
+            )
+            print(f"\n[{log_prefix}] {context} | fold={fold}/{config.n_folds}")
+            print(
+                f"[{log_prefix}] train proteins={len(tr_groups):,} | valid proteins={len(va_groups):,} | "
+                f"train candidates={tr_x.shape[0]:,} | valid candidates={va_x.shape[0]:,}"
+            )
             dtr = xgb.DMatrix(tr_x, label=tr_y, missing=np.nan, group=tr_groups, feature_names=names)
             dva = xgb.DMatrix(va_x, label=va_y, missing=np.nan, group=va_groups, feature_names=names)
-            booster = xgb.train(params=params, dtrain=dtr, num_boost_round=config.rounds, evals=[(dtr, "train"), (dva, "valid")], callbacks=[xgb.callback.EarlyStopping(rounds=config.early_stopping_rounds, save_best=True)], verbose_eval=50)
-            booster.save_model(str(model_dir / f"ltr_{aspect}_fold{fold}.json"))
+            booster = xgb.train(
+                params=params, dtrain=dtr, num_boost_round=config.rounds,
+                evals=[(dtr, "train"), (dva, "valid")],
+                callbacks=[xgb.callback.EarlyStopping(rounds=config.early_stopping_rounds, save_best=True)],
+                verbose_eval=50,
+            )
+            model_path = model_dir / f"ltr_{aspect}_fold{fold}.json"
+            booster.save_model(str(model_path))
+            best_iter = int(getattr(booster, "best_iteration", -1))
+            best_score = float(getattr(booster, "best_score", np.nan))
+            fold_scores.append(best_score)
+            print()
+            print(
+                f"[{log_prefix}] {context} | fold={fold}/{config.n_folds} complete | "
+                f"best_iter={best_iter} | valid_ndcg@{k}={best_score:.5f}"
+            )
+            print(f"[{log_prefix}] wrote: {model_path}")
             scores = monotone_unit_arctan(booster.predict(dva).astype(np.float32, copy=False))
             fold_prots.append(va_prots)
             fold_states.append(CSRState(indptr=va_indptr, indices=va_terms, scores=scores))
+
+        mean_score = float(np.nanmean(np.asarray(fold_scores, dtype=np.float64)))
+        print_separator(log_prefix, f"{context} | fold summary")
+        print(f"[{log_prefix}] {context} | mean valid_ndcg@{k}={mean_score:.5f}")
+        print()
         prots = np.concatenate(fold_prots)
         ids = entry_ids[prots]
         state = concat_states(fold_states)
-        topk_pos, topk_scores = post_out.postprocess_state(state=state, data_type="oof", entry_ids=ids, aspect_name=aspect, propagate=True, add_nonexp_terms=False, add_exp_terms=False, drop_known=False)
+        topk_pos, topk_scores = post_out.postprocess_state(
+            state=state, data_type="oof", entry_ids=ids, aspect_name=aspect,
+            propagate=True, add_nonexp_terms=False, add_exp_terms=False, drop_known=False,
+            log_context=None,
+            log_prefix=log_prefix,
+        )
         topk_scores = np.round(topk_scores, 3).astype(np.float32, copy=False)
         part = build_submission_df(ids, topk_pos, topk_scores, aspect_gt)
         part["aspect"] = aspect
         oof_parts.append(part)
-    save_submit_parquet(pd.concat(oof_parts, ignore_index=True), out_dir / "oof/oof_ltr.parquet")
+
+    oof_path = out_dir / "oof/oof_ltr.parquet"
+    save_submit_parquet(pd.concat(oof_parts, ignore_index=True), oof_path)
+    print(f"[{log_prefix}] wrote OOF: {oof_path}")
     return out_dir
 
-
-def predict_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, model_dir: str | Path | None = None, out_dir: str | Path | None = None, config: LTRConfig | None = None) -> pd.DataFrame:
+def predict_ltr(
+    dataset: DatasetSpec,
+    members: list[LTRMember] | None = None,
+    model_dir: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    config: LTRConfig | None = None,
+    index_df: pd.DataFrame | None = None,
+    log_prefix: str = "predict",
+) -> pd.DataFrame:
     import xgboost as xgb
 
     config = LTRConfig() if config is None else config
@@ -207,11 +269,12 @@ def predict_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, mo
     out_dir = root / "final" if out_dir is None else Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    test_index = load_index_df(dataset.test_index)
+    test_index = load_index_df(dataset.test_index) if index_df is None else index_df.copy()
     test_ids = pd.unique(test_index["EntryID"]).astype(object, copy=False)
     prepared_gt = load_prepared_gt(dataset.ground_truth)
     post_in = Postprocessor(POSTPROCESS_IN, test_index, prepared_gt)
     post_out = Postprocessor(POSTPROCESS_OUT, test_index, prepared_gt)
+    print(f"[{log_prefix}] ltr | proteins={len(test_ids):,} | folds={config.n_folds}")
 
     parts = []
     for aspect, aspect_gt in prepared_gt.items():
@@ -221,6 +284,11 @@ def predict_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, mo
         packer = LTRPacker(aspect_gt, states, extra, nonexp)
         names = feature_names(members, config, nonexp)
         groups, x, prots, term_indptr, term_indices = packer.pack(np.arange(int(test_ids.size), dtype=np.int32))
+        print_separator(log_prefix, f"ltr | prediction | aspect={aspect}")
+        print(
+            f"[{log_prefix}] proteins={len(groups):,} | "
+            f"candidates={x.shape[0]:,} | features={x.shape[1]:,}"
+        )
         dmx = xgb.DMatrix(x, missing=np.nan, group=groups, feature_names=names)
 
         scores = np.zeros(int(term_indices.size), dtype=np.float32)
@@ -235,12 +303,17 @@ def predict_ltr(dataset: DatasetSpec, members: list[LTRMember] | None = None, mo
         topk_pos, topk_scores = post_out.postprocess_state(
             state=state, data_type="test", entry_ids=ids, aspect_name=aspect,
             propagate=True, add_nonexp_terms=False, add_exp_terms=False, drop_known=True,
+            log_context=None,
+            log_prefix=log_prefix,
         )
         part = build_submission_df(ids, topk_pos, topk_scores, aspect_gt)
         part["aspect"] = aspect
         parts.append(part)
 
     submission = pd.concat(parts, ignore_index=True)
-    save_submit_tsv(submission, out_dir / "submission.tsv")
+    submission_path = out_dir / "submission.tsv"
+    save_submit_tsv(submission, submission_path)
+    print(f"[{log_prefix}] wrote final submission: {submission_path}")
+    print(f"[{log_prefix}] final rows={(submission['score'] > 0).sum():,}")
     return submission
 

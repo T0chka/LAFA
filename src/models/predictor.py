@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
+from src.core.debug import print_separator
 from src.core.io import load_embeddings_for_index, load_index_df, load_prepared_gt
 from src.core.postprocess import PostprocessConfig, Postprocessor
 from src.data.dataset import DatasetSpec
@@ -154,8 +155,10 @@ def train_predictor(
     spec: PredictorSpec,
     out_dir: Path | None = None,
     debug: bool = True,
+    log_prefix: str | None = None,
 ) -> None:
     out_dir = predictor_dir(dataset, spec) if out_dir is None else Path(out_dir)
+    log_prefix = log_prefix or {"hmlp": "build_hmlp", "mlp": "build_mlp", "pyboost": "build_pyboost"}[spec.model]
     out_dir.mkdir(parents=True, exist_ok=True)
     oof_dir = out_dir / "oof"
     oof_dir.mkdir(parents=True, exist_ok=True)
@@ -163,9 +166,14 @@ def train_predictor(
     train_index = load_index_df(dataset.train_index)
     prepared_gt = load_prepared_gt(dataset.ground_truth)
     seq_keys_x, x = load_embeddings_for_index(
-        train_index, embedding_dirs(dataset, spec), verbose=True
+        train_index, embedding_dirs(dataset, spec), verbose=False
     )
     postprocess = Postprocessor(LTR_POSTPROCESS, train_index, prepared_gt)
+
+    print(
+        f"[{log_prefix}] model={spec.name} | embeddings={','.join(spec.embeddings)} | "
+        f"unique_sequences={len(seq_keys_x):,} | feature_dim={x.shape[1]:,}"
+    )
 
     for aspect, min_freq in spec.min_freq.items():
         aspect_gt = prepared_gt[aspect]
@@ -178,6 +186,14 @@ def train_predictor(
         aspect_dir.mkdir(parents=True, exist_ok=True)
 
         model = make_model(spec)
+        model.log_context = f"{spec.name} | {aspect}"
+        model.log_prefix = log_prefix
+        n_folds = int(model.config.n_splits)
+        print_separator(log_prefix, f"{spec.name} | aspect={aspect}")
+        print(
+            f"[{log_prefix}] samples={x_aspect.shape[0]:,} | features={x_aspect.shape[1]:,} | "
+            f"targets={y_aspect.shape[1]:,} | folds={n_folds}"
+        )
         result = model.fit(
             features=x_aspect,
             targets=y_aspect,
@@ -187,6 +203,8 @@ def train_predictor(
             debug=debug,
             compute_metrics=True,
         )
+
+        print(f"[{log_prefix}] wrote term IDs: {aspect_dir / 'term_ids.npy'}")
 
         logits = result["oof_logits"].astype(np.float32, copy=False)
         probs = (1.0 / (1.0 + np.exp(-logits))).astype(np.float32, copy=False)
@@ -202,13 +220,14 @@ def train_predictor(
             add_nonexp_terms=False,
             add_exp_terms=False,
             drop_known=False,
+            log_context=None,
+            log_prefix=log_prefix,
         )
+        oof_path = oof_dir / f"oof_for_ltr_{aspect}.npz"
         np.savez_compressed(
-            oof_dir / f"oof_for_ltr_{aspect}.npz",
-            entry_ids=entry_ids,
-            term_pos=topk_pos,
-            scores=topk_scores,
+            oof_path, entry_ids=entry_ids, term_pos=topk_pos, scores=topk_scores
         )
+        print(f"[{log_prefix}] wrote OOF: {oof_path}")
 
 
 def predict_predictor(
@@ -218,6 +237,7 @@ def predict_predictor(
     index_df: pd.DataFrame | None = None,
     save_dir: str | Path | None = None,
     batch_size: int = 8192,
+    log_prefix: str = "predict",
 ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     import gc
 
@@ -229,7 +249,7 @@ def predict_predictor(
 
     prepared_gt = load_prepared_gt(dataset.ground_truth)
     seq_keys_x, x = load_embeddings_for_index(
-        index_df, embedding_dirs(dataset, spec), verbose=True
+        index_df, embedding_dirs(dataset, spec), verbose=False
     )
     postprocess = Postprocessor(LTR_POSTPROCESS, index_df, prepared_gt)
     output = {}
@@ -242,6 +262,10 @@ def predict_predictor(
 
     n_seq = int(seq_keys_x.size)
     n_rows = int(index_df.shape[0])
+    print(
+        f"\n[{log_prefix}] model={spec.name} | proteins={n_rows:,} | "
+        f"unique_sequences={n_seq:,} | feature_dim={x.shape[1]:,}"
+    )
 
     for aspect in spec.min_freq:
         aspect_gt = prepared_gt[aspect]
@@ -249,8 +273,12 @@ def predict_predictor(
         term_ids = np.load(aspect_dir / "term_ids.npy", allow_pickle=True)
         term_pos = postprocess.map_terms_to_pos(aspect, term_ids)
         model = make_model(spec)
+        model.log_context = f"{spec.name} | {aspect}"
+        model.log_prefix = log_prefix
         k = int(postprocess._topk_by_aspect[aspect])
 
+        print_separator(log_prefix, f"{spec.name} | prediction | aspect={aspect}")
+        print(f"[{log_prefix}] targets={len(term_ids):,}")
         all_ids = np.empty(n_rows, dtype=object)
         all_pos = np.full((n_rows, k), -1, dtype=np.int32)
         all_scores = np.zeros((n_rows, k), dtype=np.float32)
@@ -263,9 +291,7 @@ def predict_predictor(
             x_batch = x[start:end]
 
             logits = model.predict_logits_ensemble(
-                features=x_batch,
-                aspect_gt=aspect_gt,
-                aspect_dir=aspect_dir,
+                features=x_batch, aspect_gt=aspect_gt, aspect_dir=aspect_dir
             )
             probs = (1.0 / (1.0 + np.exp(-logits))).astype(np.float32, copy=False)
             entry_ids, probs = postprocess.map_seqs_to_prots(seq_batch, probs)
@@ -279,6 +305,8 @@ def predict_predictor(
                 add_nonexp_terms=False,
                 add_exp_terms=False,
                 drop_known=True,
+                log_context=None,
+                log_prefix=log_prefix,
             )
 
             n = int(entry_ids.size)
@@ -287,28 +315,26 @@ def predict_predictor(
             all_scores[offset:offset + n] = topk_scores
             offset += n
 
-            print(
-                f"[predict] {spec.name} {aspect}: "
-                f"{batch_no}/{n_batches} seq={end:,}/{n_seq:,} "
-                f"proteins={offset:,}/{n_rows:,}"
-            )
+            if n_batches > 1:
+                print(
+                    f"[{log_prefix}] {spec.name} | {aspect} | batch={batch_no}/{n_batches} | "
+                    f"sequences={end:,}/{n_seq:,} | proteins={offset:,}/{n_rows:,}"
+                )
 
             del logits, probs, state, topk_pos, topk_scores
             gc.collect()
 
         if offset != n_rows:
             raise RuntimeError(
-                f"{spec.name} {aspect}: predicted {offset} proteins, "
-                f"expected {n_rows}"
+                f"{spec.name} {aspect}: predicted {offset} proteins, expected {n_rows}"
             )
 
         if submit_dir is not None:
+            submit_path = submit_dir / f"submit_for_ltr_{aspect}.npz"
             np.savez_compressed(
-                submit_dir / f"submit_for_ltr_{aspect}.npz",
-                entry_ids=all_ids,
-                term_pos=all_pos,
-                scores=all_scores,
+                submit_path, entry_ids=all_ids, term_pos=all_pos, scores=all_scores
             )
+            print(f"[{log_prefix}] wrote prediction: {submit_path}")
         else:
             output[aspect] = (all_ids, all_pos, all_scores)
 
@@ -317,8 +343,16 @@ def predict_predictor(
 
     return output
 
-def build_predictor(dataset: DatasetSpec, spec: PredictorSpec, debug: bool = True) -> Path:
+def build_predictor(
+    dataset: DatasetSpec,
+    spec: PredictorSpec,
+    debug: bool = True,
+    log_prefix: str | None = None,
+) -> Path:
     out_dir = predictor_dir(dataset, spec)
-    train_predictor(dataset, spec, out_dir=out_dir, debug=debug)
-    predict_predictor(dataset, spec, model_dir=out_dir, save_dir=out_dir)
+    log_prefix = log_prefix or {"hmlp": "build_hmlp", "mlp": "build_mlp", "pyboost": "build_pyboost"}[spec.model]
+    train_predictor(dataset, spec, out_dir=out_dir, debug=debug, log_prefix=log_prefix)
+    predict_predictor(
+        dataset, spec, model_dir=out_dir, save_dir=out_dir, log_prefix=log_prefix
+    )
     return out_dir

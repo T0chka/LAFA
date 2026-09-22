@@ -41,11 +41,11 @@ The local scorer is used for model development and comparison across windows. Fi
 | Source | Future | Status | Unique proteins | Notes |
 |---|---|---:|---:|---|
 | Sep_2025 | Nov_2025 | complete | 5,898 | Production GT reproduced exactly |
-| Sep_2025 | Dec_2025 | pending | 6018 |  |
-| Sep_2025 | Mar_2026 | pending |  |  |
-| Nov_2025 | Dec_2025 | pending | 642 |  |
-| Nov_2025 | Mar_2026 | pending |  |  |
-| Dec_2025 | Mar_2026 | pending |  |  |
+| Sep_2025 | Dec_2025 | complete | 6,018 | |
+| Sep_2025 | Mar_2026 | complete | 7,401 | |
+| Nov_2025 | Dec_2025 | complete | 642 | |
+| Nov_2025 | Mar_2026 | complete | 3,255 | |
+| Dec_2025 | Mar_2026 | complete | 2,745 | |
 
 ---
 
@@ -64,7 +64,7 @@ The local scorer is used for model development and comparison across windows. Fi
 Source snapshot `Sep_2025`:
 
 - train proteins: 87,925;
-- direct protein-GO pairs: 547,694;
+- protein-GO rows: 547,694;
 - proteins with new evaluable annotations in `Nov_2025`: 5,898.
 
 ---
@@ -84,16 +84,28 @@ Source snapshot `Sep_2025`:
 Source snapshot `Sep_2025`:
 
 - train proteins: 87,925;
-- direct protein-GO pairs: 547,694;
-- proteins with new evaluable annotations in `Dec_2025`: 6018.
+- protein-GO rows: 547,694;
+- proteins with new evaluable annotations in `Dec_2025`: 6,018.
 
 ---
 
 ## Sep_2025 -> Mar_2026
 
-Status: pending.
+| Method | NK-BPO | NK-CCO | NK-MFO | LK-BPO | LK-CCO | LK-MFO | PK-BPO | PK-CCO | PK-MFO | Mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hmlp_esm2 | 0.304398 | 0.476480 | 0.567779 | 0.345762 | 0.490745 | 0.531730 | 0.133668 | 0.245579 | 0.195688 | 0.365759 |
+| mlp_t5_esm1b | 0.317331 | 0.482862 | 0.572460 | 0.355713 | 0.476060 | 0.565521 | 0.134368 | 0.252128 | 0.209694 | 0.374015 |
+| pyb_t5 | 0.290387 | 0.476751 | 0.532765 | 0.304626 | 0.481818 | 0.504530 | 0.128216 | 0.228307 | 0.179074 | 0.347386 |
+| blast_knn | 0.045790 | 0.176447 | 0.226845 | 0.059012 | 0.191339 | 0.183123 | 0.026259 | 0.095009 | 0.084654 | 0.120942 |
+| naive_prior | 0.001660 | 0.138339 | 0.023584 | 0.002328 | 0.159821 | 0.026727 | 0.003170 | 0.084402 | 0.019208 | 0.051027 |
+| nonexp | 0.063505 | 0.197375 | 0.453792 | 0.081626 | 0.192807 | 0.342642 | 0.030980 | 0.106189 | 0.121774 | 0.176743 |
+| ltr | 0.354118 | 0.496398 | 0.658007 | 0.365385 | 0.477918 | 0.589115 | 0.133426 | 0.247577 | 0.231291 | 0.394804 |
 
-Results will be appended here after scoring.
+Source snapshot `Sep_2025`:
+
+- train proteins: 87,925;
+- protein-GO rows: 547,694;
+- proteins with new evaluable annotations in `Mar_2026`: 7,401.
 
 ---
 
@@ -112,24 +124,48 @@ Results will be appended here after scoring.
 Source data update from `Sep_2025` to `Nov_2025`:
 
 - train proteins: 87,925 -> 88,068 (+143 net; +360 added, -217 removed);
-- direct protein-GO pairs: 547,694 -> 549,522 (+1,828);
+- protein-GO rows: 547,694 -> 549,522 (+1,828);
 - proteins with new evaluable annotations in `Dec_2025`: 642.
 
 ---
 
 ## Nov_2025 -> Mar_2026
 
-Status: pending.
+| Method | NK-BPO | NK-CCO | NK-MFO | LK-BPO | LK-CCO | LK-MFO | PK-BPO | PK-CCO | PK-MFO | Mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hmlp_esm2 | 0.320567 | 0.517611 | 0.491446 | 0.437609 | 0.431358 | 0.496467 | 0.142726 | 0.209475 | 0.204735 | 0.361333 |
+| mlp_t5_esm1b | 0.318452 | 0.541063 | 0.523031 | 0.446690 | 0.431543 | 0.509143 | 0.143691 | 0.226477 | 0.219085 | 0.373242 |
+| pyb_t5 | 0.286416 | 0.530091 | 0.477872 | 0.347955 | 0.431106 | 0.480554 | 0.133106 | 0.186725 | 0.185709 | 0.339948 |
+| blast_knn | 0.068551 | 0.227495 | 0.270872 | 0.057546 | 0.192444 | 0.190330 | 0.027379 | 0.090265 | 0.098781 | 0.135962 |
+| naive_prior | 0.002401 | 0.165978 | 0.092199 | 0.001634 | 0.116690 | 0.045372 | 0.006446 | 0.064676 | 0.057008 | 0.061378 |
+| nonexp | 0.090007 | 0.273895 | 0.481346 | 0.082731 | 0.177336 | 0.330175 | 0.034179 | 0.104224 | 0.127320 | 0.189024 |
+| ltr | 0.406802 | 0.566173 | 0.610065 | 0.463127 | 0.434604 | 0.568699 | 0.147715 | 0.235096 | 0.238426 | 0.407856 |
 
-Results will be appended here after scoring.
+Source snapshot `Nov_2025`:
+
+- train proteins: 88,068;
+- protein-GO rows: 549,522;
+- proteins with new evaluable annotations in `Mar_2026`: 3,255.
 
 ---
 
 ## Dec_2025 -> Mar_2026
 
-Status: pending.
+| Method | NK-BPO | NK-CCO | NK-MFO | LK-BPO | LK-CCO | LK-MFO | PK-BPO | PK-CCO | PK-MFO | Mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hmlp_esm2 | 0.308927 | 0.574262 | 0.478363 | 0.452662 | 0.509744 | 0.536772 | 0.136826 | 0.227509 | 0.187878 | 0.379216 |
+| mlp_t5_esm1b | 0.307279 | 0.585755 | 0.520114 | 0.457527 | 0.508808 | 0.540105 | 0.142111 | 0.232611 | 0.207177 | 0.389054 |
+| pyb_t5 | 0.273697 | 0.574803 | 0.465659 | 0.367630 | 0.484017 | 0.507452 | 0.129757 | 0.201468 | 0.177714 | 0.353577 |
+| blast_knn | 0.048467 | 0.232630 | 0.280206 | 0.059215 | 0.234334 | 0.196473 | 0.029690 | 0.098652 | 0.098642 | 0.142034 |
+| naive_prior | 0.002250 | 0.181193 | 0.122346 | 0.001329 | 0.169976 | 0.046092 | 0.006744 | 0.066338 | 0.063106 | 0.073264 |
+| nonexp | 0.067209 | 0.329123 | 0.443620 | 0.079169 | 0.248570 | 0.331318 | 0.033462 | 0.093425 | 0.116646 | 0.193616 |
+| ltr | 0.370622 | 0.612550 | 0.586838 | 0.479934 | 0.519313 | 0.562478 | 0.140485 | 0.247657 | 0.219045 | 0.415436 |
 
-Results will be appended here after scoring.
+Source data update from `Nov_2025` to `Dec_2025`:
+
+- train proteins: 88,068 -> 88,088 (+20 net; +54 added, -34 removed);
+- protein-GO rows: 549,522 -> 547,492 (-2,030);
+- proteins with new evaluable annotations in `Mar_2026`: 2,745.
 
 ---
 

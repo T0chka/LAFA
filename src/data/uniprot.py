@@ -48,8 +48,8 @@ def _iter_fasta_ids(path: Path) -> Iterator[str]:
                 yield _parse_entry_id(line[1:].strip())
 
 
-def update_uniprot_annotations(spec: DatasetSpec) -> None:
-    """Build current-snapshot GOA features for current train and query proteins."""
+def update_uniprot_annotations(spec: DatasetSpec, log_prefix: str = "prepare_data") -> None:
+    """Build current-snapshot GOA features for current train and test proteins."""
     if not spec.uniprot_gaf_parquet.exists():
         raise FileNotFoundError(f"UniProt-GOA parquet not found: {spec.uniprot_gaf_parquet}")
 
@@ -175,6 +175,20 @@ def update_uniprot_annotations(spec: DatasetSpec) -> None:
     finally:
         con.close()
 
-    print(f"[uniprot] wrote: {spec.not_terms_uniprot}")
-    print(f"[uniprot] wrote: {spec.test_terms_uniprot}")
-    print(f"[uniprot] wrote: {spec.nonexp_codes_uniprot}")
+    import pyarrow.parquet as pq
+
+    not_rows = pq.ParquetFile(spec.not_terms_uniprot).metadata.num_rows
+    test_rows = pq.ParquetFile(spec.test_terms_uniprot).metadata.num_rows
+    nonexp_rows = pq.ParquetFile(spec.nonexp_codes_uniprot).metadata.num_rows
+    print(
+        f"[{log_prefix}] wrote UniProt NOT annotations: {spec.not_terms_uniprot} | "
+        f"rows={not_rows:,}"
+    )
+    print(
+        f"[{log_prefix}] wrote UniProt-GOA annotations for test proteins: {spec.test_terms_uniprot} | "
+        f"rows={test_rows:,}"
+    )
+    print(
+        f"[{log_prefix}] wrote UniProt non-experimental evidence features: "
+        f"{spec.nonexp_codes_uniprot} | rows={nonexp_rows:,}"
+    )

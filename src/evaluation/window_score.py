@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.csr import pack_row_aligned_csr
+from src.core.debug import print_separator
 from src.core.io import load_prepared_gt
 from src.core.scoring import score_weighted_f
 
@@ -50,7 +51,11 @@ def _read_targets(path: Path) -> set[str]:
     return targets
 
 
-def _load_groundtruth(groundtruth_dir: Path, source_gt: dict) -> dict[str, dict[str, dict]]:
+def _load_groundtruth(
+    groundtruth_dir: Path,
+    source_gt: dict,
+    log_prefix: str = "score_eval",
+) -> dict[str, dict[str, dict]]:
     paths = {regime: groundtruth_dir / f"groundtruth_{regime}.tsv" for regime in REGIMES}
     required = list(paths.values()) + [
         groundtruth_dir / "groundtruth_PK_known.tsv",
@@ -115,14 +120,17 @@ def _load_groundtruth(groundtruth_dir: Path, source_gt: dict) -> dict[str, dict[
                 },
             }
 
-    print("=== democafa ground truth ===")
+    print_separator(log_prefix, "Ground-truth composition")
     for regime in REGIMES:
         counts = []
         for aspect in ASPECTS:
             n = int(out[regime][aspect]["gt"]["gt_ids"].size)
             counts.append(f"{aspect}={n:,}")
-        print(f"{regime}: proteins={frames[regime]['EntryID'].nunique():,} " + " ".join(counts))
-    print(f"unique targets={len(targets):,} terms_of_interest={len(toi):,}")
+        print(
+            f"[{log_prefix}] {regime} | proteins={frames[regime]['EntryID'].nunique():,} | "
+            + " | ".join(counts)
+        )
+    print(f"[{log_prefix}] unique targets={len(targets):,} | terms_of_interest={len(toi):,}")
     return out
 
 
@@ -216,31 +224,36 @@ def score_window(
     future_snapshot: str,
     output_dir: str | Path | None = None,
     th_step: float = 0.01,
+    prediction_work: str | Path | None = None,
+    log_prefix: str = "score_eval",
 ):
     groundtruth_dir = Path(groundtruth_dir)
     source_work = Path(source_work)
+    prediction_work = source_work if prediction_work is None else Path(prediction_work)
     output_dir = groundtruth_dir if output_dir is None else Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"[{log_prefix}] window={source_snapshot} -> {future_snapshot}")
+    print(f"[{log_prefix}] predictions: {prediction_work}")
+    print(f"[{log_prefix}] ground truth: {groundtruth_dir}")
+    print(f"[{log_prefix}] threshold step={th_step:g}")
     source_gt = load_prepared_gt(source_work / "prepared" / "ground_truth.pkl")
-    gt_by_regime = _load_groundtruth(groundtruth_dir, source_gt)
+    gt_by_regime = _load_groundtruth(groundtruth_dir, source_gt, log_prefix=log_prefix)
     wanted_by_aspect = {aspect: _target_ids(gt_by_regime, aspect) for aspect in ASPECTS}
-    ltr = _load_ltr(source_work, source_gt, wanted_by_aspect)
+    ltr = _load_ltr(prediction_work, source_gt, wanted_by_aspect)
 
     rows = []
     for method in METHODS:
-        print(f"\n=== {method} ===")
         for aspect in ASPECTS:
             if method == "ltr":
                 entry_ids, term_pos, scores = ltr[aspect]
             else:
-                entry_ids, term_pos, scores = _load_component(source_work, method, aspect, wanted_by_aspect[aspect])
+                entry_ids, term_pos, scores = _load_component(prediction_work, method, aspect, wanted_by_aspect[aspect])
             for regime in REGIMES:
                 gt = gt_by_regime[regime]
                 tau, f_micro, covered = _best_f(gt, entry_ids, term_pos, scores, aspect, th_step)
                 n_targets = int(gt[aspect]["gt"]["gt_ids"].size)
                 rows.append((source_snapshot, future_snapshot, method, regime, aspect, n_targets, covered, tau, f_micro))
-                print(f"{regime} {aspect}: n={n_targets:,} tau={tau:.2f} f_micro={f_micro:.6f}")
 
     long = pd.DataFrame(
         rows,
@@ -274,9 +287,9 @@ def score_window(
     tau.insert(0, "source_snapshot", source_snapshot)
     tau.reset_index().to_csv(output_dir / "thresholds.tsv", sep="\t", index=False, float_format="%.2f")
 
-    print("\n=== f_micro ===")
+    print_separator(log_prefix, "F-micro results")
     print(wide.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
-    print(f"\n[evaluation] wrote: {output_dir / 'scores_long.tsv'}")
-    print(f"[evaluation] wrote: {output_dir / 'scores.tsv'}")
-    print(f"[evaluation] wrote: {output_dir / 'thresholds.tsv'}")
+    print(f"[{log_prefix}] wrote: {output_dir / 'scores_long.tsv'}")
+    print(f"[{log_prefix}] wrote: {output_dir / 'scores.tsv'}")
+    print(f"[{log_prefix}] wrote: {output_dir / 'thresholds.tsv'}")
     return long, wide

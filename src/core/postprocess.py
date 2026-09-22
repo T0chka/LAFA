@@ -109,7 +109,6 @@ class Postprocessor:
             # Use same top_k for all aspects
             self._topk_by_aspect = {aspect: int(config.top_k) for aspect in prepared_gt.keys()}
 
-        print(f"[INFO] aspect top-k: {self._topk_by_aspect}")
 
     def _get_topk_by_aspect(
         self,
@@ -387,6 +386,8 @@ class Postprocessor:
         add_nonexp_terms: bool = False,
         add_exp_terms: bool = False,
         drop_known: bool = True,
+        log_context: str | None = None,
+        log_prefix: str = "postprocess",
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Postprocess state and return topk_pos, topk_scores.
@@ -398,37 +399,37 @@ class Postprocessor:
         )
 
         state = self.drop_not_terms(state, aspect_name, entry_ids)
-        print_state_stats(state, "After drop_not_terms")
+        print_state_stats(state, "after drop_not_terms", log_context, log_prefix)
 
         if propagate:
             state = self.propagate(state, aspect_name)
-            print_state_stats(state, "After propagate")
+            print_state_stats(state, "after propagate", log_context, log_prefix)
 
         if data_type == "test":
             # add extra terms (with score=1.0 by default)
             if add_nonexp_terms:
                 extra = self.prepare_extra_terms(aspect_name, entry_ids, "test_nonexp")
                 state = self.blend_states([state, extra], mode="mean")
-                print_state_stats(state, "After blend_states (nonexp)")
+                print_state_stats(state, "after blend_states (nonexp)", log_context, log_prefix)
 
             if add_exp_terms:
                 extra = self.prepare_extra_terms(aspect_name, entry_ids, "test_exp")
                 state = self.blend_states([state, extra], mode="max")
-                print_state_stats(state, "After blend_states (exp)")
+                print_state_stats(state, "after blend_states (exp)", log_context, log_prefix)
 
             # drop not-terms, propagate, drop known terms, apply filters
             if add_nonexp_terms or add_exp_terms:
                 state = self.drop_not_terms(state, aspect_name, entry_ids)
-                print_state_stats(state, "After drop_not_terms (after blend)")
+                print_state_stats(state, "after drop_not_terms (after blend)", log_context, log_prefix)
                 state = self.propagate(state, aspect_name)
-                print_state_stats(state, "After propagate (after blend)")
+                print_state_stats(state, "after propagate (after blend)", log_context, log_prefix)
 
         if drop_known:
             state = self.drop_known_terms(state, aspect_name, entry_ids)
-            print_state_stats(state, "After drop_known_terms")
+            print_state_stats(state, "after drop_known_terms", log_context, log_prefix)
 
         state = self.apply_filters(state, aspect_name)
-        print_state_stats(state, "After apply_filters")
+        print_state_stats(state, "after apply_filters", log_context, log_prefix)
 
         # select top-k terms per protein
         topk_pos, topk_scores = self.topk(state, aspect_name=aspect_name)

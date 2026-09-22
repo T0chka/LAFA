@@ -9,6 +9,7 @@ from config import dataset_from_paths
 from scripts.build_hmlp import SPEC as HMLP_SPEC
 from scripts.build_mlp import SPEC as MLP_SPEC
 from scripts.build_pyboost import SPEC as PYBOOST_SPEC
+from src.core.debug import print_separator
 from src.data.prepare import prepare_dataset
 from src.embeddings.generate import generate_embeddings
 from src.embeddings.specs import ESM1B_650M, ESM2_3B, PROT_T5
@@ -44,6 +45,10 @@ def _copy_output(source: Path, target: Path) -> None:
         shutil.copyfile(source, target)
 
 
+def _stage(prefix: str, title: str) -> None:
+    print_separator(prefix, title, char="=")
+
+
 def main() -> None:
     args = _parser().parse_args()
     ds = dataset_from_paths(
@@ -57,22 +62,46 @@ def main() -> None:
         ia_file=args.ia_file,
     )
 
-    prepare_dataset(ds)
+    _stage("prepare_data", "Prepare snapshot data")
+    prepare_dataset(ds, log_prefix="prepare_data")
+
+    _stage("make_embeddings", "Generate or reuse protein embeddings")
     for spec in (ESM2_3B, PROT_T5, ESM1B_650M):
-        generate_embeddings(ds, spec)
-    build_predictor(ds, HMLP_SPEC)
-    build_predictor(ds, MLP_SPEC)
-    build_predictor(ds, PYBOOST_SPEC)
-    train_hits, test_hits = ensure_blast_hits(ds, threads=args.num_threads)
-    build_blast_component(ds, train_hits, test_hits)
-    build_naive_component(ds)
-    build_nonexp_component(ds)
-    train_ltr(ds)
-    predict_ltr(ds)
+        generate_embeddings(ds, spec, log_prefix="make_embeddings")
+
+    _stage("build_hmlp", "Train HMLP and create OOF/test predictions")
+    build_predictor(ds, HMLP_SPEC, log_prefix="build_hmlp")
+
+    _stage("build_mlp", "Train MLP and create OOF/test predictions")
+    build_predictor(ds, MLP_SPEC, log_prefix="build_mlp")
+
+    _stage("build_pyboost", "Train PyBoost and create OOF/test predictions")
+    build_predictor(ds, PYBOOST_SPEC, log_prefix="build_pyboost")
+
+    _stage("build_blast", "Build full BLAST-KNN component")
+    train_hits, test_hits = ensure_blast_hits(
+        ds, threads=args.num_threads, log_prefix="build_blast"
+    )
+    build_blast_component(
+        ds, train_hits, test_hits, log_prefix="build_blast"
+    )
+
+    _stage("build_naive", "Build naive-prior component")
+    build_naive_component(ds, log_prefix="build_naive")
+
+    _stage("build_nonexp", "Build non-experimental component")
+    build_nonexp_component(ds, log_prefix="build_nonexp")
+
+    _stage("train_ltr", "Train learning-to-rank ensemble")
+    train_ltr(ds, log_prefix="train_ltr")
+
+    _stage("predict", "Generate final ensemble prediction")
+    predict_ltr(ds, log_prefix="predict")
 
     source = Path(args.work_dir) / "final" / "submission.tsv"
-    _copy_output(source, Path(args.output_file))
-    print(f"[lafa] wrote: {args.output_file}")
+    target = Path(args.output_file)
+    _copy_output(source, target)
+    print(f"[lafa] wrote requested output: {target}")
 
 
 if __name__ == "__main__":

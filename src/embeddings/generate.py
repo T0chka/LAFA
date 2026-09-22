@@ -77,10 +77,10 @@ def _token_batches(df: pd.DataFrame, max_tokens: int):
         i = j
 
 
-def existing_seq_keys(out_dir: Path) -> tuple[set[str], list[Path]]:
+def existing_seq_keys(out_dir: Path, log_prefix: str = "make_embeddings") -> tuple[set[str], list[Path]]:
     tmp_paths = sorted(out_dir.glob("part-*.parquet.tmp"))
     if tmp_paths:
-        _log(f"[embed] {out_dir.name}: removing {len(tmp_paths)} incomplete temp shard(s)")
+        _log(f"[{log_prefix}] {out_dir.name}: removing {len(tmp_paths)} incomplete temp shard(s)")
         for path in tmp_paths:
             path.unlink()
 
@@ -93,7 +93,7 @@ def existing_seq_keys(out_dir: Path) -> tuple[set[str], list[Path]]:
             if table.num_rows == 0:
                 raise RuntimeError("empty shard")
         except Exception as exc:
-            _log(f"[embed] {out_dir.name}: removing corrupt shard {path.name}: {exc}")
+            _log(f"[{log_prefix}] {out_dir.name}: removing corrupt shard {path.name}: {exc}")
             path.unlink()
             continue
 
@@ -146,7 +146,7 @@ def _write_parquet(
     return out_path
 
 
-def _load_model(spec: EmbeddingSpec, device: str):
+def _load_model(spec: EmbeddingSpec, device: str, log_prefix: str = "make_embeddings"):
     t0 = time.perf_counter()
 
     if spec.backend == "prott5":
@@ -158,7 +158,7 @@ def _load_model(spec: EmbeddingSpec, device: str):
         if not cache_dir.is_dir():
             raise FileNotFoundError(f"ProtT5 cache is missing: {cache_dir}")
 
-        print(f"[embed] {spec.name}: loading local HF model {spec.model_id}", flush=True)
+        print(f"[{log_prefix}] {spec.name}: loading local HF model {spec.model_id}", flush=True)
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 spec.model_id, use_fast=False, local_files_only=True
@@ -173,7 +173,7 @@ def _load_model(spec: EmbeddingSpec, device: str):
 
         model = model.to(device).eval()
         print(
-            f"[embed] {spec.name}: model ready in "
+            f"[{log_prefix}] {spec.name}: model ready in "
             f"{time.perf_counter() - t0:.1f}s",
             flush=True,
         )
@@ -193,7 +193,7 @@ def _load_model(spec: EmbeddingSpec, device: str):
 
     size_gib = checkpoint.stat().st_size / 1024**3
     print(
-        f"[embed] {spec.name}: loading local checkpoint "
+        f"[{log_prefix}] {spec.name}: loading local checkpoint "
         f"{size_gib:.2f} GiB",
         flush=True,
     )
@@ -212,7 +212,7 @@ def _load_model(spec: EmbeddingSpec, device: str):
 
     model = model.eval().to(device)
     print(
-        f"[embed] {spec.name}: model ready in "
+        f"[{log_prefix}] {spec.name}: model ready in "
         f"{time.perf_counter() - t0:.1f}s",
         flush=True,
     )
@@ -300,25 +300,17 @@ def _run_with_split(
     return rows
 
 
-def generate_embeddings(dataset: DatasetSpec, spec: EmbeddingSpec, device: str = DEVICE) -> None:
+def generate_embeddings(
+    dataset: DatasetSpec,
+    spec: EmbeddingSpec,
+    device: str = DEVICE,
+    log_prefix: str = "make_embeddings",
+) -> None:
     out_dir = embedding_dir(dataset, spec)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    t_prep = time.perf_counter()
-
-    t0 = time.perf_counter()
     train_df = pd.read_parquet(dataset.train_index, columns=["seq_key", "sequence", "length"])
-    dt = time.perf_counter() - t0
-    if dt >= 1:
-        _log(f"[embed] {spec.name}: read train index in {dt:.1f}s")
-
-    t0 = time.perf_counter()
     test_df = pd.read_parquet(dataset.test_index, columns=["seq_key", "sequence", "length"])
-    dt = time.perf_counter() - t0
-    if dt >= 1:
-        _log(f"[embed] {spec.name}: read test index in {dt:.1f}s")
-
-    t0 = time.perf_counter()
     combined = pd.concat([train_df, test_df], ignore_index=True)
     unique_df = (
         combined.drop_duplicates(subset=["seq_key"], keep="first")
@@ -326,43 +318,27 @@ def generate_embeddings(dataset: DatasetSpec, spec: EmbeddingSpec, device: str =
         .reset_index(drop=True)
     )
     del combined
-    dt = time.perf_counter() - t0
-    if dt >= 1:
-        _log(f"[embed] {spec.name}: deduplicated/sorted in {dt:.1f}s")
 
     total_unique = len(unique_df)
-
-    t0 = time.perf_counter()
-    done_keys, part_paths = existing_seq_keys(out_dir)
-    dt = time.perf_counter() - t0
-    if dt >= 1:
-        _log(f"[embed] {spec.name}: scanned {len(part_paths)} cache shards in {dt:.1f}s")
-
+    done_keys, part_paths = existing_seq_keys(out_dir, log_prefix=log_prefix)
     part = _next_part_index(part_paths)
-
-    t0 = time.perf_counter()
     if done_keys:
         unique_df = unique_df.loc[~unique_df["seq_key"].isin(done_keys)].copy()
-    dt = time.perf_counter() - t0
-    if dt >= 1:
-        _log(f"[embed] {spec.name}: filtered cache hits in {dt:.1f}s")
-
     remaining = len(unique_df)
-    prep_time = time.perf_counter() - t_prep
+    reused = total_unique - remaining
 
     _log(
-        f"[embed] {spec.name}: required={total_unique:,} cached={len(done_keys):,} "
-        f"remaining={remaining:,} | prep={prep_time:.1f}s"
+        f"[{log_prefix}] {spec.name}: required={total_unique:,} | reused={reused:,} | "
+        f"new={remaining:,}"
     )
-
     if remaining == 0:
-        _log(f"[embed] {spec.name}: complete, nothing to do")
         return
 
-    model, helper, layer = _load_model(spec, device)
+    model, helper, layer = _load_model(spec, device, log_prefix=log_prefix)
 
     buffer: list[tuple[str, int, np.ndarray]] = []
     processed = 0
+    written_shards = 0
     t0 = time.time()
     last_print = t0
 
@@ -376,6 +352,7 @@ def generate_embeddings(dataset: DatasetSpec, spec: EmbeddingSpec, device: str =
                 _write_parquet(buffer[:ROWS_PER_PARQUET], out_dir, part, spec)
                 buffer = buffer[ROWS_PER_PARQUET:]
                 part += 1
+                written_shards += 1
 
             now = time.time()
             if now - last_print >= PRINT_EVERY_SECONDS:
@@ -383,29 +360,28 @@ def generate_embeddings(dataset: DatasetSpec, spec: EmbeddingSpec, device: str =
                 pct = 100.0 * processed / remaining
                 eta = (remaining - processed) / rate / 60
                 _log(
-                    f"[embed] {spec.name}: {processed:,}/{remaining:,} ({pct:.1f}%) | "
+                    f"[{log_prefix}] {spec.name}: {processed:,}/{remaining:,} ({pct:.1f}%) | "
                     f"{rate:.1f} seq/s | ETA {eta:.1f} min"
                 )
                 last_print = now
 
     if buffer:
         _write_parquet(buffer, out_dir, part, spec)
+        written_shards += 1
 
     elapsed = time.time() - t0
-    _log(
-        f"[embed] {spec.name}: computed {processed:,} in {elapsed / 60:.1f} min "
-        f"({processed / elapsed:.1f} seq/s)"
-    )
-
     required = set(train_df["seq_key"].unique()) | set(test_df["seq_key"].unique())
-    embedded, _ = existing_seq_keys(out_dir)
+    embedded, _ = existing_seq_keys(out_dir, log_prefix=log_prefix)
     missing = required - embedded
-
     if missing:
         raise RuntimeError(f"{len(missing)} required seq_keys are missing embeddings.")
 
-    _log(f"[embed] {spec.name}: verified {len(required):,} required seq_keys")
-
+    _log(
+        f"[{log_prefix}] {spec.name}: computed={processed:,} | shards_written={written_shards:,} | "
+        f"elapsed={elapsed / 60:.1f} min"
+    )
+    _log(f"[{log_prefix}] wrote embeddings: {out_dir / 'part-*.parquet'} | new shards={written_shards:,}")
+    _log(f"[{log_prefix}] {spec.name}: verified={len(required):,} required sequences")
 
 def embed_sequences(
     sequences: pd.DataFrame,

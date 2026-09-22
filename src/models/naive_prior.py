@@ -37,7 +37,14 @@ def _state(entry_ids: np.ndarray, term_pos: np.ndarray, scores: np.ndarray) -> C
     return CSRState(indptr=indptr, indices=np.tile(term_pos, n_rows).astype(np.int32, copy=False), scores=np.tile(scores, n_rows).astype(np.float32, copy=False))
 
 
-def _save(index_df: pd.DataFrame, priors: pd.DataFrame, prepared_gt: dict, data_type: str, out_dir: Path) -> None:
+def _save(
+    index_df: pd.DataFrame,
+    priors: pd.DataFrame,
+    prepared_gt: dict,
+    data_type: str,
+    out_dir: Path,
+    log_prefix: str,
+) -> None:
     entry_ids = pd.unique(index_df["EntryID"]).astype(object, copy=False)
     postprocess = Postprocessor(POSTPROCESS, index_df, prepared_gt)
     prefix = "oof" if data_type == "oof" else "submit"
@@ -47,18 +54,67 @@ def _save(index_df: pd.DataFrame, priors: pd.DataFrame, prepared_gt: dict, data_
         block = priors.loc[priors["aspect"] == aspect]
         term_pos = postprocess.map_terms_to_pos(aspect, block["term"].to_numpy(dtype=object, copy=False))
         state = _state(entry_ids, term_pos, block["score"].to_numpy(dtype=np.float32, copy=False))
-        topk_pos, topk_scores = postprocess.postprocess_state(state=state, data_type=data_type, entry_ids=entry_ids, aspect_name=aspect, propagate=False, add_nonexp_terms=False, add_exp_terms=False, drop_known=(data_type == "test"))
-        np.savez_compressed(target / f"{prefix}_for_ltr_{aspect}.npz", entry_ids=entry_ids, term_pos=topk_pos, scores=topk_scores)
+        label = "OOF" if data_type == "oof" else "prediction"
+        print(f"[{log_prefix}] naive_prior | {label} | {aspect}")
+        topk_pos, topk_scores = postprocess.postprocess_state(
+            state=state, data_type=data_type, entry_ids=entry_ids, aspect_name=aspect,
+            propagate=False, add_nonexp_terms=False, add_exp_terms=False,
+            drop_known=(data_type == "test"),
+            log_context=None,
+            log_prefix=log_prefix,
+        )
+        out_path = target / f"{prefix}_for_ltr_{aspect}.npz"
+        np.savez_compressed(out_path, entry_ids=entry_ids, term_pos=topk_pos, scores=topk_scores)
+        print(f"[{log_prefix}] wrote {label}: {out_path}")
+        print()
 
 
-def build_naive_component(dataset: DatasetSpec, out_dir: str | Path | None = None) -> Path:
-    out_dir = dataset.prepared_dir.parent / "predictors/naive_prior" if out_dir is None else Path(out_dir)
+def _priors(dataset: DatasetSpec) -> tuple[pd.DataFrame, dict]:
     train_index = load_index_df(dataset.train_index)
-    test_index = load_index_df(dataset.test_index)
     train_terms = load_terms_df(_terms_path(dataset))
     prepared_gt = load_prepared_gt(dataset.ground_truth)
     postprocess = Postprocessor(POSTPROCESS, train_index, prepared_gt)
     priors = build_term_priors(train_terms, postprocess._topk_by_aspect)
-    _save(train_index, priors, prepared_gt, "oof", out_dir)
-    _save(test_index, priors, prepared_gt, "test", out_dir)
+    return priors, prepared_gt
+
+
+def build_naive_oof(
+    dataset: DatasetSpec,
+    out_dir: str | Path | None = None,
+    log_prefix: str = "build_naive",
+) -> Path:
+    out_dir = dataset.prepared_dir.parent / "predictors/naive_prior" if out_dir is None else Path(out_dir)
+    priors, prepared_gt = _priors(dataset)
+    train_index = load_index_df(dataset.train_index)
+    counts = priors.groupby("aspect", sort=False).size().to_dict()
+    print(
+        f"[{log_prefix}] OOF predictions for LTR | proteins={train_index['EntryID'].nunique():,} | "
+        f"prior terms: BPO={counts.get('BPO', 0):,} CCO={counts.get('CCO', 0):,} MFO={counts.get('MFO', 0):,}"
+    )
+    _save(train_index, priors, prepared_gt, "oof", out_dir, log_prefix)
+    return out_dir
+
+
+def predict_naive_component(
+    dataset: DatasetSpec,
+    index_df: pd.DataFrame,
+    out_dir: str | Path,
+    log_prefix: str = "predict",
+) -> Path:
+    out_dir = Path(out_dir)
+    priors, prepared_gt = _priors(dataset)
+    print(f"[{log_prefix}] component predictions | proteins={index_df['EntryID'].nunique():,}")
+    _save(index_df, priors, prepared_gt, "test", out_dir, log_prefix)
+    return out_dir
+
+
+def build_naive_component(
+    dataset: DatasetSpec,
+    out_dir: str | Path | None = None,
+    log_prefix: str = "build_naive",
+) -> Path:
+    out_dir = build_naive_oof(dataset, out_dir, log_prefix=log_prefix)
+    predict_naive_component(
+        dataset, load_index_df(dataset.test_index), out_dir, log_prefix=log_prefix
+    )
     return out_dir

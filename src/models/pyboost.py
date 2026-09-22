@@ -102,17 +102,11 @@ class PyBoostModel:
 
         n_samples = int(features.shape[0])
         n_targets = int(targets.shape[1])
-
-        if debug:
-            print(f"[DEBUG] fit: n_samples={n_samples}, n_targets={n_targets}")
+        context = getattr(self, "log_context", "pyboost")
+        log_prefix = getattr(self, "log_prefix", "train")
 
         targets_dense = np.asarray(targets.toarray(), dtype=np.float32)
         folds = self._make_folds(n_samples, self.config.n_splits)
-
-        if debug:
-            print(f"[DEBUG] Created folds: {self.config.n_splits} splits")
-            fold_counts = {i: int(np.sum(folds == i)) for i in range(1, self.config.n_splits + 1)}
-            print(f"[DEBUG] Fold sizes: {fold_counts}")
 
         oof_logits = np.full((n_samples, n_targets), np.nan, dtype=np.float32)
         fold_val_loss = []
@@ -120,18 +114,13 @@ class PyBoostModel:
         fold_val_ap = []
 
         for fold_id in range(1, self.config.n_splits + 1):
-            print(f"\nFold {fold_id}/{self.config.n_splits}")
+            print(f"\n[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits}")
             train_idx = np.where(folds != fold_id)[0]
             valid_idx = np.where(folds == fold_id)[0]
 
             x_train, x_valid, norm_params = normalize_train_valid(
                 features, train_idx, valid_idx, method=self.config.normalization
             )
-            if debug:
-                print(
-                    f"[DEBUG] Fold {fold_id}: x_train shape={x_train.shape}, "
-                    f"x_valid shape={x_valid.shape}"
-                )
 
             y_train = targets_dense[train_idx]
             y_valid = targets_dense[valid_idx]
@@ -143,22 +132,6 @@ class PyBoostModel:
             if alpha > 0.0:
                 w = self._term_neg_weights_from_targets(targets[train_idx], alpha=alpha)
                 neg_weight_cp = cp.asarray(w, dtype=cp.float32)
-                if debug:
-                    w_np = w.astype(np.float32, copy=False)
-                    n = int(w_np.size)
-                    n_gt1 = int(np.sum(w_np > 1.0))
-                    n_lt1 = int(np.sum(w_np < 1.0))
-                    n_eq1 = int(n - n_gt1 - n_lt1)
-                    print(
-                        f"[DEBUG] neg_weight split: <1={n_lt1}/{n}, "
-                        f"=1={n_eq1}/{n}, >1={n_gt1}/{n}"
-                    )
-                    logw = np.log(w.astype(np.float64))
-                    q = np.quantile(logw, [0.01, 0.1, 0.5, 0.9, 0.99])
-                    print(
-                        f"[DEBUG] logw q01={q[0]:.3f} q10={q[1]:.3f} q50={q[2]:.3f} "
-                        f"q90={q[3]:.3f} q99={q[4]:.3f}"
-                    )
 
             loss = BCEWithNegWeightsLoss(neg_weight=neg_weight_cp)
 
@@ -186,34 +159,26 @@ class PyBoostModel:
                 eval_sets=[{"X": x_valid, "y": y_valid}],
             )
 
-            print("Predicting valid set")
             probs = model.predict(x_valid)
             logits = self._probs_to_logits(probs)
 
             val_loss = self._bce_loss(y_valid, logits)
 
             # Calculate ROC AUC and Average Precision for multilabel classification (optional)
+            print()
             if compute_metrics:
-                print("Calculating metrics")
                 val_auc, val_ap, n_valid_terms = multilabel_metrics(y_valid, probs)
-                if n_valid_terms < y_valid.shape[1]:
-                    print(
-                        f"[WARNING] Fold {fold_id}: valid terms for AUC/AP = "
-                        f"{n_valid_terms}/{y_valid.shape[1]}"
-                    )
                 print(
-                    f"[INFO] Fold {fold_id}: "
-                    f"val_loss={val_loss:.4f}, val_auc={val_auc:.4f}, val_ap={val_ap:.4f}"
+                    f"[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits} complete | "
+                    f"val_loss={val_loss:.4f} | AUC={val_auc:.4f} | AP={val_ap:.4f} | "
+                    f"metric_terms={n_valid_terms:,}/{y_valid.shape[1]:,}"
                 )
                 fold_val_auc.append(float(val_auc))
                 fold_val_ap.append(float(val_ap))
             else:
                 val_auc = np.nan
                 val_ap = np.nan
-                print(
-                    f"[INFO] Fold {fold_id}: "
-                    f"val_loss={val_loss:.4f}"
-                )
+                print(f"[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits} complete | val_loss={val_loss:.4f}")
                 fold_val_auc.append(np.nan)
                 fold_val_ap.append(np.nan)
 
@@ -225,6 +190,7 @@ class PyBoostModel:
             model_path = models_dir / f"fold_{fold_id:02d}.pkl.gz"
             with gzip.open(model_path, "wb", compresslevel=6) as f:
                 pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"[{log_prefix}] wrote: {model_path}")
 
             # Save normalization parameters (method-specific)
             norm_dict = {"method": self.config.normalization}
@@ -233,10 +199,10 @@ class PyBoostModel:
                     norm_dict[key] = value.astype(np.float32, copy=False)
                 else:
                     norm_dict[key] = value
-            np.savez_compressed(
-                models_dir / f"fold_{fold_id:02d}_norm.npz",
-                **norm_dict
-            )
+            norm_path = models_dir / f"fold_{fold_id:02d}_norm.npz"
+            np.savez_compressed(norm_path, **norm_dict)
+            print(f"[{log_prefix}] wrote: {norm_path}")
+
 
             # Free GPU memory after each fold
             del model, probs, logits
@@ -250,10 +216,13 @@ class PyBoostModel:
             fold_val_ap=fold_val_ap if compute_metrics else None,
             debug=debug,
             oof_logits=oof_logits,
+            context=context,
+            log_prefix=log_prefix,
         )
 
         # Save term_ids for test prediction
-        np.save(out_dir / "term_ids.npy", np.asarray(term_ids, dtype=object))
+        term_ids_path = out_dir / "term_ids.npy"
+        np.save(term_ids_path, np.asarray(term_ids, dtype=object))
 
         return {
             "model": "pyboost",
@@ -339,7 +308,6 @@ class PyBoostModel:
             n_batches = (n_samples + batch_size - 1) // batch_size
             first_batch_size = min(batch_size, n_samples)
 
-            print(f"[DEBUG] Fold {fold_id}: Predicting batch 1 of {n_batches}", end='\r', flush=True)
             first_probs = model.predict(x_fold[:first_batch_size])
             n_targets = first_probs.shape[1]
 
@@ -348,7 +316,6 @@ class PyBoostModel:
 
             batch_num = 2
             for i in range(first_batch_size, n_samples, batch_size):
-                print(f"[DEBUG] Fold {fold_id}: Predicting batch {batch_num} of {n_batches}", end='\r', flush=True)
                 end_idx = min(i + batch_size, n_samples)
                 probs[i:end_idx] = model.predict(x_fold[i:end_idx])
                 batch_num += 1

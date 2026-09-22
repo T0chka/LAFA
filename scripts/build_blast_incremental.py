@@ -11,7 +11,7 @@ import pandas as pd
 
 from config import dataset
 from src.core.io import load_index_df, load_terms_df
-from src.models.blast_knn import BlastKNNConfig, _folds, build_blast_component
+from src.models.blast_knn import BlastKNNConfig, _folds, build_blast_oof_component
 
 
 HIT_COLUMNS = ["qseqid", "sseqid", "bitscore", "evalue"]
@@ -30,7 +30,7 @@ def _snapshot_key(name: str) -> tuple[int, int] | None:
 
 
 def _previous_snapshot(current: Path) -> Path:
-    """Find the latest earlier snapshot with reusable BLAST query hits."""
+    """Find the latest earlier snapshot with reusable train-vs-train hits."""
     current_key = _snapshot_key(current.name)
     if current_key is None:
         raise RuntimeError(f"Cannot parse snapshot name: {current.name}")
@@ -40,8 +40,8 @@ def _previous_snapshot(current: Path) -> Path:
         key = _snapshot_key(path.name)
         if not path.is_dir() or key is None or key >= current_key:
             continue
-        full_hits = path / "blast/hits_query.parquet"
-        incr_hits = path / "blast_incremental/hits_query.parquet"
+        full_hits = path / "blast/hits_train_vs_train.parquet"
+        incr_hits = path / "blast_incremental/hits_train_vs_train.parquet"
         if (path / "prepared/train_index.parquet").exists() and (
             full_hits.exists() or incr_hits.exists()
         ):
@@ -49,7 +49,7 @@ def _previous_snapshot(current: Path) -> Path:
 
     if not candidates:
         raise RuntimeError(
-            f"No earlier snapshot with BLAST hits found under {current.parent}"
+            f"No earlier snapshot with train BLAST hits found under {current.parent}"
         )
 
     return max(candidates, key=lambda item: item[0])[1]
@@ -81,21 +81,32 @@ def _write_fasta(df: pd.DataFrame, path: Path) -> None:
             handle.write(f">{seq_key}\n{sequence}\n")
 
 
-def _make_db(fasta: Path, prefix: Path) -> None:
+def _make_db(fasta: Path, prefix: Path) -> bool:
     """Build a BLAST protein database when it does not already exist."""
-    if (
-        prefix.with_suffix(".pin").exists()
-        or prefix.with_suffix(".pdb").exists()
-    ):
-        return
+    if prefix.with_suffix(".pin").exists() or prefix.with_suffix(".pdb").exists():
+        return False
     prefix.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
             "makeblastdb", "-in", str(fasta), "-dbtype", "prot",
             "-parse_seqids", "-out", str(prefix),
         ],
-        check=True,
+        check=True, capture_output=True, text=True,
     )
+    return True
+
+
+def _report_blast_stderr(stderr: str) -> None:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    o_warnings = [line for line in lines if "O characters replaced by X" in line]
+    if o_warnings:
+        print(
+            f"[blast] warning: non-standard residue O replaced by X in "
+            f"{len(o_warnings):,} query sequence(s)"
+        )
+    for line in lines:
+        if line not in o_warnings:
+            print(f"[blast] warning: {line}")
 
 
 def _run_blast(
@@ -116,7 +127,8 @@ def _run_blast(
     if dbsize is not None:
         args.extend(["-dbsize", str(int(dbsize))])
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(args, check=True)
+    result = subprocess.run(args, check=True, capture_output=True, text=True)
+    _report_blast_stderr(result.stderr)
 
 
 def _read_hits(path: Path) -> pd.DataFrame:
@@ -256,10 +268,8 @@ def _full_train_hits(
     hits = _collapse_top500(_read_hits(tsv), 1e-3)
     hits.to_parquet(out, index=False)
     tsv.unlink()
-    print(
-        f"[blast-incremental] exact train fallback: "
-        f"{len(hits):,} rows -> {out}"
-    )
+    print(f"[blast] full train-vs-train complete | hits={len(hits):,}")
+    print(f"[blast] wrote: {out}")
     return out
 
 
@@ -283,9 +293,7 @@ def _incremental_train_hits(
         previous_root, "hits_train_vs_train.parquet"
     )
     if previous_path is None:
-        print(
-            "[blast-incremental] no reusable train hits; using full fallback"
-        )
+        print("[blast] no reusable train hits | running full train-vs-train search")
         return _full_train_hits(full_db, root, threads)
 
     current_keys = set(current_train["seq_key"].astype(str))
@@ -295,6 +303,7 @@ def _incremental_train_hits(
     removed_subjects = previous_keys - current_keys
     new_queries = current_keys - previous_keys
 
+    print(f"[blast] reusing train hits: {previous_path}")
     previous_hits = _collapse_top500(
         _read_hits(previous_path), config.evalue_max
     )
@@ -336,9 +345,17 @@ def _incremental_train_hits(
         added_db = root / "db_added/added"
         shared_fasta = root / "train_shared.fasta"
         _write_fasta(added, added_fasta)
-        _make_db(added_fasta, added_db)
+        print(
+            f"[blast] incremental subject DB | added sequences={len(added):,}"
+        )
+        if _make_db(added_fasta, added_db):
+            print(f"[blast] DB ready: {added_db}")
         _write_fasta(shared, shared_fasta)
         delta_tsv = root / "hits_train_added.tsv"
+        print(
+            f"[blast] search shared queries against added subjects | "
+            f"queries={len(shared):,} | subjects={len(added):,}"
+        )
         _run_blast(
             shared_fasta, added_db, delta_tsv, threads,
             dbsize=current_dbsize,
@@ -363,6 +380,7 @@ def _incremental_train_hits(
         fallback_queries.update(shared_queries - saturated)
 
     if fallback_queries:
+        print(f"[blast] full train fallback | queries={len(fallback_queries):,}")
         fallback = current_train.loc[
             current_train["seq_key"].isin(fallback_queries)
         ].copy()
@@ -381,13 +399,11 @@ def _incremental_train_hits(
     merged.to_parquet(out, index=False)
     fallback_pct = 100.0 * len(fallback_queries) / max(len(current_keys), 1)
     print(
-        f"[blast-incremental] train queries: {len(current_keys):,}; "
-        f"new: {len(new_queries):,}; full fallback: "
-        f"{len(fallback_queries):,} ({fallback_pct:.2f}%)"
+        f"[blast] train-vs-train complete | queries={len(current_keys):,} | "
+        f"new={len(new_queries):,} | full fallback={len(fallback_queries):,} "
+        f"({fallback_pct:.2f}%) | hits={len(merged):,}"
     )
-    print(
-        f"[blast-incremental] train hits: {len(merged):,} rows -> {out}"
-    )
+    print(f"[blast] wrote: {out}")
     return out
 
 
@@ -499,20 +515,69 @@ def _incremental_test_hits(
         fallback_fasta.unlink()
 
     merged.to_parquet(out, index=False)
+    fallback_pct = 100.0 * len(fallback_queries) / max(len(current_test_keys), 1)
     print(
-        f"[blast-incremental] train seq delta: +{len(added_subjects):,} "
-        f"-{len(removed_subjects):,}"
+        f"[blast] query incremental complete | queries={len(current_test_keys):,} | "
+        f"full fallback={len(fallback_queries):,} ({fallback_pct:.2f}%) | "
+        f"hits={len(merged):,}"
     )
-    fallback_pct = (
-        100.0 * len(fallback_queries) / max(len(current_test_keys), 1)
-    )
-    print(
-        f"[blast-incremental] test queries: {len(current_test_keys):,}; "
-        f"full fallback: {len(fallback_queries):,} "
-        f"({fallback_pct:.2f}%)"
-    )
-    print(f"[blast-incremental] query hits: {len(merged):,} rows -> {out}")
+    print(f"[blast] wrote: {out}")
     return out
+
+
+def ensure_incremental_blast_train_hits(
+    spec,
+    config: BlastKNNConfig | None = None,
+    threads: int | None = None,
+) -> Path:
+    config = BlastKNNConfig() if config is None else config
+    for executable in ("makeblastdb", "blastp"):
+        if shutil.which(executable) is None:
+            raise RuntimeError(f"{executable} is required on PATH")
+
+    current_root = spec.prepared_dir.parent
+    previous_root = _previous_snapshot(current_root)
+    root = current_root / "blast_incremental"
+    root.mkdir(parents=True, exist_ok=True)
+
+    train_index = load_index_df(spec.train_index)
+    current_train = _unique_sequences(spec.train_index)
+    previous_train = _unique_sequences(
+        previous_root / "prepared/train_index.parquet"
+    )
+
+    current_keys = set(current_train["seq_key"].astype(str))
+    previous_keys = set(previous_train["seq_key"].astype(str))
+    print(f"[blast] snapshot={previous_root.name} -> {current_root.name}")
+    print(
+        f"[blast] train sequences={len(current_keys):,} | "
+        f"added={len(current_keys - previous_keys):,} | "
+        f"removed={len(previous_keys - current_keys):,}"
+    )
+
+    train_fasta = root / "db/train_unique.fasta"
+    full_db = root / "db/train"
+    if not train_fasta.exists():
+        _write_fasta(current_train, train_fasta)
+        print(f"[blast] wrote: {train_fasta}")
+    if _make_db(train_fasta, full_db):
+        print(f"[blast] train DB ready: {full_db}")
+    else:
+        print(f"[blast] using train DB: {full_db}")
+    print("[blast] building incremental train-vs-train hits")
+
+    n_threads = int(threads or min(16, os.cpu_count() or 1))
+    return _incremental_train_hits(
+        previous_root=previous_root,
+        current_train=current_train,
+        previous_train=previous_train,
+        full_db=full_db,
+        root=root,
+        train_index=train_index,
+        train_terms_path=spec.train_terms,
+        config=config,
+        threads=n_threads,
+    )
 
 
 def ensure_incremental_blast_hits(
@@ -541,8 +606,7 @@ def ensure_incremental_blast_hits(
         previous_root / "prepared/test_index.parquet"
     )
 
-    print(f"[blast-incremental] previous snapshot: {previous_root.name}")
-    print(f"[blast-incremental] current snapshot:  {current_root.name}")
+    print(f"[blast] snapshot={previous_root.name} -> {current_root.name}")
 
     train_fasta = root / "db/train_unique.fasta"
     test_fasta = root / "db/test_unique.fasta"
@@ -582,17 +646,13 @@ def ensure_incremental_blast_hits(
 
 
 def main() -> None:
-    """Build the incremental BLAST-KNN component for the active snapshot."""
     spec = dataset()
     config = BlastKNNConfig()
-    train_hits, test_hits = ensure_incremental_blast_hits(spec, config=config)
-    out_dir = build_blast_component(
-        spec,
-        train_hits_path=train_hits,
-        test_hits_path=test_hits,
-        config=config,
+    train_hits = ensure_incremental_blast_train_hits(spec, config=config)
+    out_dir = build_blast_oof_component(
+        spec, train_hits_path=train_hits, config=config
     )
-    print(f"[blast-incremental] component ready: {out_dir}")
+    print(f"[blast] complete | OOF component={out_dir}")
 
 
 if __name__ == "__main__":

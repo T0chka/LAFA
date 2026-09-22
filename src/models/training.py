@@ -5,6 +5,8 @@ Helper functions for training models.
 import numpy as np
 import numba as nb
 
+from src.core.debug import print_separator
+
 
 @nb.njit(cache=True)
 def _auc_from_sorted(scores: np.ndarray, labels: np.ndarray,
@@ -234,29 +236,24 @@ def print_fold_metrics(
     fold_val_ap: list[float] | None = None,
     debug: bool = False,
     oof_logits: np.ndarray | None = None,
+    context: str | None = None,
+    log_prefix: str = "train",
 ) -> tuple[float, float, float]:
-    """
-    Print fold metrics and return mean values.
-    """
     mean_loss = float(np.nanmean(np.array(fold_val_loss, dtype=np.float64)))
+    print_separator(log_prefix, f"{context} | fold summary" if context else "Fold summary")
+    prefix = f"[{log_prefix}] {context}" if context else f"[{log_prefix}]"
 
     if fold_val_auc is not None and fold_val_ap is not None:
         mean_auc = float(np.nanmean(np.array(fold_val_auc, dtype=np.float64)))
         mean_ap = float(np.nanmean(np.array(fold_val_ap, dtype=np.float64)))
-        print(f"\n[INFO] Fold val_loss: {[f'{x:.4f}' for x in fold_val_loss]}")
-        print(f"[INFO] Fold val_auc: {[f'{x:.4f}' for x in fold_val_auc]}")
-        print(f"[INFO] Fold val_ap: {[f'{x:.4f}' for x in fold_val_ap]}")
-        print(f"\n[INFO] Mean val_loss: {mean_loss:.4f}, Mean val_auc: {mean_auc:.4f}, Mean val_ap: {mean_ap:.4f}")
+        print(
+            f"{prefix} | mean_loss={mean_loss:.4f} | "
+            f"mean_AUC={mean_auc:.4f} | mean_AP={mean_ap:.4f}"
+        )
     else:
         mean_auc = np.nan
         mean_ap = np.nan
-        print(f"\n[INFO] Fold val_loss: {[f'{x:.4f}' for x in fold_val_loss]}")
-        print(f"\n[INFO] Mean val_loss: {mean_loss:.4f}")
-
-    if debug and oof_logits is not None:
-        print(
-            f"[DEBUG] OOF logits: shape={oof_logits.shape} | "
-            f"min={oof_logits.min():.4f}, max={oof_logits.max():.4f}, mean={oof_logits.mean():.4f}"
-        )
+        print(f"{prefix} | mean_loss={mean_loss:.4f}")
 
     return mean_loss, mean_auc, mean_ap
+

@@ -1,5 +1,6 @@
 from config import dataset
-from src.models.predictor import PredictorSpec, build_predictor
+from src.core.debug import print_separator
+from src.models.predictor import PredictorSpec, train_predictor
 
 
 SPEC = PredictorSpec(
@@ -11,4 +12,5 @@ SPEC = PredictorSpec(
 
 
 if __name__ == "__main__":
-    build_predictor(dataset(), SPEC)
+    print_separator("build_hmlp", "Train HMLP", char="=")
+    train_predictor(dataset(), SPEC, log_prefix="build_hmlp")

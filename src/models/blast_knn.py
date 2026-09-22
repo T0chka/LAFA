@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.csr import pack_csr_from_pairs_with_data
+from src.core.debug import print_separator
 from src.core.io import load_index_df, load_prepared_gt, load_terms_df
 from src.core.postprocess import CSRState, PostprocessConfig, Postprocessor
 from src.data.dataset import DatasetSpec
@@ -71,7 +72,14 @@ def _folds(n: int, n_folds: int, seed: int):
         yield train, valid
 
 
-def _long_to_npz(df: pd.DataFrame, index_df: pd.DataFrame, prepared_gt: dict, data_type: str, out_dir: Path) -> None:
+def _long_to_npz(
+    df: pd.DataFrame,
+    index_df: pd.DataFrame,
+    prepared_gt: dict,
+    data_type: str,
+    out_dir: Path,
+    log_prefix: str,
+) -> None:
     entry_ids = pd.unique(index_df["EntryID"]).astype(object, copy=False)
     entry_pos = {str(entry_id): i for i, entry_id in enumerate(entry_ids.tolist())}
     postprocess = Postprocessor(POSTPROCESS, index_df, prepared_gt)
@@ -90,26 +98,57 @@ def _long_to_npz(df: pd.DataFrame, index_df: pd.DataFrame, prepared_gt: dict, da
             scores = block["score"].to_numpy(dtype=np.float32, copy=False)
         indptr, indices, values = pack_csr_from_pairs_with_data(row_pos, term_pos, scores, len(entry_ids))
         state = CSRState(indptr=indptr, indices=indices, scores=values)
-        topk_pos, topk_scores = postprocess.postprocess_state(state=state, data_type=data_type, entry_ids=entry_ids, aspect_name=aspect, propagate=False, add_nonexp_terms=False, add_exp_terms=False, drop_known=(data_type == "test"))
-        np.savez_compressed(target / f"{prefix}_for_ltr_{aspect}.npz", entry_ids=entry_ids, term_pos=topk_pos, scores=topk_scores)
+        label = "OOF" if data_type == "oof" else "prediction"
+        print_separator(log_prefix, f"blast_knn | {label} | aspect={aspect}")
+        print(
+            f"[{log_prefix}] {label} | aspect={aspect} | proteins={len(entry_ids):,} | "
+            f"raw prediction rows={len(block):,}"
+        )
+        topk_pos, topk_scores = postprocess.postprocess_state(
+            state=state, data_type=data_type, entry_ids=entry_ids, aspect_name=aspect,
+            propagate=False, add_nonexp_terms=False, add_exp_terms=False,
+            drop_known=(data_type == "test"),
+            log_context=None,
+            log_prefix=log_prefix,
+        )
+        out_path = target / f"{prefix}_for_ltr_{aspect}.npz"
+        np.savez_compressed(out_path, entry_ids=entry_ids, term_pos=topk_pos, scores=topk_scores)
+        print(f"[{log_prefix}] wrote {label}: {out_path}")
+        print()
 
 
-def build_blast_component(dataset: DatasetSpec, train_hits_path: str | Path, test_hits_path: str | Path, out_dir: str | Path | None = None, config: BlastKNNConfig | None = None) -> Path:
-    config = BlastKNNConfig() if config is None else config
-    out_dir = dataset.prepared_dir.parent / "predictors/blast_knn" if out_dir is None else Path(out_dir)
-    train_index = load_index_df(dataset.train_index)
-    test_index = load_index_df(dataset.test_index)
-    prepared_gt = load_prepared_gt(dataset.ground_truth)
+def _train_terms_by_seq(dataset: DatasetSpec, train_index: pd.DataFrame) -> pd.DataFrame:
     train_terms = load_terms_df(_terms_path(dataset))
     entry_to_seq = dict(zip(train_index["EntryID"], train_index["seq_key"]))
     train_terms["seq_key"] = train_terms["EntryID"].map(entry_to_seq)
-    train_terms = train_terms.dropna(subset=["seq_key"]).loc[:, ["seq_key", "term", "aspect"]].drop_duplicates()
+    return train_terms.dropna(subset=["seq_key"]).loc[:, ["seq_key", "term", "aspect"]].drop_duplicates()
+
+
+def build_blast_oof_component(
+    dataset: DatasetSpec,
+    train_hits_path: str | Path,
+    out_dir: str | Path | None = None,
+    config: BlastKNNConfig | None = None,
+    log_prefix: str = "build_blast",
+) -> Path:
+    config = BlastKNNConfig() if config is None else config
+    out_dir = dataset.prepared_dir.parent / "predictors/blast_knn" if out_dir is None else Path(out_dir)
+    train_index = load_index_df(dataset.train_index)
+    prepared_gt = load_prepared_gt(dataset.ground_truth)
+    train_terms = _train_terms_by_seq(dataset, train_index)
     train_hits = prepare_hits(pd.read_parquet(train_hits_path), config)
-    test_hits = prepare_hits(pd.read_parquet(test_hits_path), config)
     seq_keys = np.unique(train_index["seq_key"].to_numpy(copy=False))
     seq_map = train_index.loc[:, ["EntryID", "seq_key"]].drop_duplicates().rename(columns={"seq_key": "qseqid"})
+    print(
+        f"[{log_prefix}] building OOF | train sequences={len(seq_keys):,} | "
+        f"hits={len(train_hits):,} | folds={config.n_folds}"
+    )
     oof_parts = []
-    for train_idx, valid_idx in _folds(len(seq_keys), config.n_folds, config.seed):
+    for fold, (train_idx, valid_idx) in enumerate(_folds(len(seq_keys), config.n_folds, config.seed), start=1):
+        print(
+            f"[{log_prefix}] OOF fold={fold}/{config.n_folds} | "
+            f"train sequences={len(train_idx):,} | valid sequences={len(valid_idx):,}"
+        )
         train_keys = seq_keys[train_idx]
         valid_keys = seq_keys[valid_idx]
         fold_hits = train_hits.loc[train_hits["qseqid"].isin(valid_keys) & train_hits["sseqid"].isin(train_keys)]
@@ -122,11 +161,32 @@ def build_blast_component(dataset: DatasetSpec, train_hits_path: str | Path, tes
             part = part.sort_values(["EntryID", "aspect", "score"], ascending=[True, True, False], kind="mergesort").groupby(["EntryID", "aspect"], sort=False, as_index=False).head(config.top_n)
             oof_parts.append(part)
     oof = pd.concat(oof_parts, ignore_index=True) if oof_parts else pd.DataFrame(columns=["EntryID", "term", "score", "aspect"])
-    _long_to_npz(oof, train_index, prepared_gt, "oof", out_dir)
-    test_map = test_index.loc[:, ["EntryID", "seq_key"]].drop_duplicates().rename(columns={"seq_key": "qseqid"})
-    test_parts = []
+    _long_to_npz(oof, train_index, prepared_gt, "oof", out_dir, log_prefix)
+    return out_dir
+
+
+def predict_blast_component(
+    dataset: DatasetSpec,
+    test_hits_path: str | Path,
+    index_df: pd.DataFrame,
+    out_dir: str | Path,
+    config: BlastKNNConfig | None = None,
+    log_prefix: str = "predict",
+) -> Path:
+    config = BlastKNNConfig() if config is None else config
+    out_dir = Path(out_dir)
+    train_index = load_index_df(dataset.train_index)
+    prepared_gt = load_prepared_gt(dataset.ground_truth)
+    train_terms = _train_terms_by_seq(dataset, train_index)
+    test_hits = prepare_hits(pd.read_parquet(test_hits_path), config)
+    test_map = index_df.loc[:, ["EntryID", "seq_key"]].drop_duplicates().rename(columns={"seq_key": "qseqid"})
     test_keys = pd.unique(test_map["qseqid"])
     test_hits = test_hits.loc[test_hits["qseqid"].isin(test_keys)]
+    print(
+        f"[{log_prefix}] blast_knn | proteins={index_df['EntryID'].nunique():,} | "
+        f"unique_sequences={len(test_keys):,} | hits={len(test_hits):,}"
+    )
+    parts = []
     for aspect, k in config.k_neighbors.items():
         terms = train_terms.loc[train_terms["aspect"] == aspect, ["seq_key", "term"]].drop_duplicates()
         scores = make_term_scores(test_hits, terms, aspect, k)
@@ -134,7 +194,25 @@ def build_blast_component(dataset: DatasetSpec, train_hits_path: str | Path, tes
             continue
         part = test_map.merge(scores, on="qseqid", how="inner", copy=False).loc[:, ["EntryID", "term", "score", "aspect"]]
         part = part.sort_values(["EntryID", "aspect", "score"], ascending=[True, True, False], kind="mergesort").groupby(["EntryID", "aspect"], sort=False, as_index=False).head(config.top_n)
-        test_parts.append(part)
-    submit = pd.concat(test_parts, ignore_index=True) if test_parts else pd.DataFrame(columns=["EntryID", "term", "score", "aspect"])
-    _long_to_npz(submit, test_index, prepared_gt, "test", out_dir)
+        parts.append(part)
+    submit = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["EntryID", "term", "score", "aspect"])
+    _long_to_npz(submit, index_df, prepared_gt, "test", out_dir, log_prefix)
+    return out_dir
+
+
+def build_blast_component(
+    dataset: DatasetSpec,
+    train_hits_path: str | Path,
+    test_hits_path: str | Path,
+    out_dir: str | Path | None = None,
+    config: BlastKNNConfig | None = None,
+    log_prefix: str = "build_blast",
+) -> Path:
+    out_dir = build_blast_oof_component(
+        dataset, train_hits_path, out_dir=out_dir, config=config, log_prefix=log_prefix
+    )
+    predict_blast_component(
+        dataset, test_hits_path, load_index_df(dataset.test_index), out_dir,
+        config=config, log_prefix=log_prefix
+    )
     return out_dir

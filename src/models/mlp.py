@@ -59,18 +59,13 @@ class TorchMLPModel:
 
         n_samples = int(features.shape[0])
         n_targets = int(targets.shape[1])
-
-        if debug:
-            print(f"[DEBUG] fit: n_samples={n_samples}, n_targets={n_targets}")
+        context = getattr(self, "log_context", "mlp")
+        log_prefix = getattr(self, "log_prefix", "train")
 
         # Convert sparse matrix to dense array
         targets = np.asarray(targets.toarray(), dtype=np.float32)
 
         folds = self._make_folds(n_samples, self.config.n_splits)
-        if debug:
-            print(f"[DEBUG] Created folds: {self.config.n_splits} splits")
-            fold_counts = {i: int(np.sum(folds == i)) for i in range(1, self.config.n_splits + 1)}
-            print(f"[DEBUG] Fold sizes: {fold_counts}")
 
         oof_logits = np.full((n_samples, n_targets), np.nan, dtype=np.float32)
         fold_val_loss = []
@@ -78,18 +73,13 @@ class TorchMLPModel:
         fold_val_ap = []
 
         for fold_id in range(1, self.config.n_splits + 1):
-            print(f"\nFold {fold_id}/{self.config.n_splits}")
+            print(f"\n[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits}")
             train_idx = np.where(folds != fold_id)[0]
             valid_idx = np.where(folds == fold_id)[0]
 
             x_train, x_valid, norm_params = normalize_train_valid(
                 features, train_idx, valid_idx, method=self.config.normalization
             )
-            if debug:
-                print(
-                    f"[DEBUG] Fold {fold_id}: x_train shape={x_train.shape}, "
-                    f"x_valid shape={x_valid.shape}"
-                )
 
             y_train = targets[train_idx]
             y_valid = targets[valid_idx]
@@ -129,27 +119,21 @@ class TorchMLPModel:
             logits, val_loss = self._predict_logits_and_loss(net, valid_dl)
 
             # Calculate ROC AUC and Average Precision for multilabel classification (optional)
+            print()
             if compute_metrics:
                 y_valid_probs = self._sigmoid(logits)
                 val_auc, val_ap, n_valid_terms = multilabel_metrics(y_valid, y_valid_probs)
-                if n_valid_terms < y_valid.shape[1]:
-                    print(
-                        f"[WARNING] Fold {fold_id}: valid terms for AUC/AP = "
-                        f"{n_valid_terms}/{y_valid.shape[1]}"
-                    )
                 print(
-                    f"[INFO] Fold {fold_id}: "
-                    f"val_loss={val_loss:.4f}, val_auc={val_auc:.4f}, val_ap={val_ap:.4f}"
+                    f"[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits} complete | "
+                    f"val_loss={val_loss:.4f} | AUC={val_auc:.4f} | AP={val_ap:.4f} | "
+                    f"metric_terms={n_valid_terms:,}/{y_valid.shape[1]:,}"
                 )
                 fold_val_auc.append(float(val_auc))
                 fold_val_ap.append(float(val_ap))
             else:
                 val_auc = np.nan
                 val_ap = np.nan
-                print(
-                    f"[INFO] Fold {fold_id}: "
-                    f"val_loss={val_loss:.4f}"
-                )
+                print(f"[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits} complete | val_loss={val_loss:.4f}")
                 fold_val_auc.append(np.nan)
                 fold_val_ap.append(np.nan)
 
@@ -158,7 +142,9 @@ class TorchMLPModel:
             fold_val_loss.append(float(val_loss))
 
             # Save model and normalization
-            torch.save(net.state_dict(), models_dir / f"fold_{fold_id:02d}.pt")
+            model_path = models_dir / f"fold_{fold_id:02d}.pt"
+            torch.save(net.state_dict(), model_path)
+            print(f"[{log_prefix}] wrote: {model_path}")
             # Save normalization parameters based on method
             norm_dict = {"method": self.config.normalization}
             if self.config.normalization == "zscore":
@@ -176,10 +162,10 @@ class TorchMLPModel:
                 pass
             # "none" doesn't need parameters
 
-            np.savez_compressed(
-                models_dir / f"fold_{fold_id:02d}_norm.npz",
-                **norm_dict
-            )
+            norm_path = models_dir / f"fold_{fold_id:02d}_norm.npz"
+            np.savez_compressed(norm_path, **norm_dict)
+            print(f"[{log_prefix}] wrote: {norm_path}")
+
 
         mean_loss, mean_auc, mean_ap = print_fold_metrics(
             fold_val_loss=fold_val_loss,
@@ -187,10 +173,13 @@ class TorchMLPModel:
             fold_val_ap=fold_val_ap if compute_metrics else None,
             debug=debug,
             oof_logits=oof_logits,
+            context=context,
+            log_prefix=log_prefix,
         )
 
         # Save term_ids for test prediction
-        np.save(out_dir / "term_ids.npy", np.asarray(term_ids, dtype=object))
+        term_ids_path = out_dir / "term_ids.npy"
+        np.save(term_ids_path, np.asarray(term_ids, dtype=object))
 
         return {
             "model": "mlp",

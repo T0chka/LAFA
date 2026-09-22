@@ -230,10 +230,7 @@ def prune_orphans(graph: OntologyGraph) -> OntologyGraph:
 
     kept_n = int(keep.sum())
     if kept_n == n_terms:
-        print(f"[prune_orphans] no change: n_terms={n_terms}")
         return graph
-
-    print(f"[prune_orphans] pruned: before={n_terms}, after={kept_n}")
 
     kept_old = np.flatnonzero(keep).astype(np.int32, copy=False)
     old_to_new = -np.ones(n_terms, dtype=np.int32)

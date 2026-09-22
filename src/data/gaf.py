@@ -1,16 +1,6 @@
 """
 Normalize a raw UniProt-GOA GAF 2.2 snapshot to the compact Parquet schema used
 by src/data/uniprot.py.
-
-Input:
-- gzip-compressed GAF 2.2 file.
-
-Output:
-- Parquet with columns EntryID, term, aspect, taxon, Qualifier, ECO.
-
-This step changes only storage format. Annotation filtering, GO
-canonicalization, evidence-code handling, and train/test restrictions are done
-later by src/data/uniprot.py.
 """
 
 from pathlib import Path
@@ -26,7 +16,11 @@ GAF_COLUMNS = [
 ]
 
 
-def normalize_gaf(gaf_gz: Path, out_parquet: Path) -> None:
+def normalize_gaf(
+    gaf_gz: Path,
+    out_parquet: Path,
+    log_prefix: str = "prepare_data",
+) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -47,11 +41,14 @@ def normalize_gaf(gaf_gz: Path, out_parquet: Path) -> None:
                 writer = pq.ParquetWriter(out_parquet, table.schema, compression="zstd")
             writer.write_table(table)
             rows += len(chunk)
-            print(f"[gaf] rows: {rows:,}", flush=True)
+            print(
+                f"[{log_prefix}] raw UniProt-GOA GAF | annotation rows read={rows:,}",
+                flush=True,
+            )
     finally:
         if writer is not None:
             writer.close()
 
     if rows == 0:
         raise ValueError(f"No annotation rows were read from {gaf_gz}")
-    print(f"[gaf] wrote: {out_parquet}")
+    print(f"[{log_prefix}] wrote normalized GAF: {out_parquet}")

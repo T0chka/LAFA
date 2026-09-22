@@ -1,29 +1,14 @@
-artifacts/*
-.venv/
-__pycache__/
-*.py[cod]
+
 *.nbc
 *.nbi
-
+*.py[cod]
 .ipynb_checkpoints/
-.pytest_cache/
 .mypy_cache/
+.pytest_cache/
 .ruff_cache/
-
-# Local environments and caches
 .venv/
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.ruff_cache/
-
-# Generated LAFA data and model artifacts
-artifacts/
-
-# Local/editor files
-.vscode/
-.idea/
-.DS_Store
-
-# Backup files
-*.bak
+artifacts/*
+scripts/analyze_windows.py
+scripts/build_blast_incremental.py
+scripts/make_dev_snapshot.py

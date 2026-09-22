@@ -96,7 +96,7 @@ Generated data, embeddings, model files, BLAST outputs, caches, and predictions 
 
 ## Local longitudinal scoring
 
-Local longitudinal evaluation must use the same ground-truth construction as FunctionBench/LAFA production. Do not reconstruct future ground truth from direct `train_terms.tsv`, do not use `process_ground_truth.py` for a released snapshot pair, and do not use the old local `build_eval` builder.
+Local longitudinal evaluation uses the same ground-truth construction as FunctionBench/LAFA production. For a released snapshot pair, ground truth is built with the official `democafa` workflow and the propagated annotation files described below.
 
 For a window `t0 -> t1`, FunctionBench first intersects the two released test FASTA files with `democafa.datacollection.compare_fasta`. It then runs `democafa.groundtruth.classify_ground_truth` with the **propagated** annotation files from both releases:
 
@@ -234,7 +234,7 @@ uv run python -m scripts.make_embeddings
 ```
 ### 3. Train the neural and boosting components
 
-Run in this order:
+The stage scripts train source-snapshot models and write OOF predictions only. They do not run test inference.
 
 ```bash
 uv run python -m scripts.build_hmlp
@@ -242,48 +242,85 @@ uv run python -m scripts.build_mlp
 uv run python -m scripts.build_pyboost
 ```
 
-### 4. Rebuild BLAST-KNN
+### 4. Rebuild BLAST-KNN OOF
 
-BLAST must be rebuilt for every source snapshot because both the training database and training annotations are snapshot-dependent.
-Check that NCBI BLAST is available:
+BLAST train-vs-train hits are snapshot-dependent. For a later source snapshot with an earlier trained snapshot available, use the incremental builder:
 
 ```bash
 command -v makeblastdb
 command -v blastp
+uv run python -m scripts.build_blast_incremental
 ```
 
-Then run:
+For the first source snapshot, when no earlier train-vs-train BLAST hits exist, use:
 
 ```bash
 uv run python -m scripts.build_blast
 ```
 
-### 5. Rebuild the non-learned components
+Both commands build the BLAST OOF component only. Test-query BLAST is deferred to prediction.
+
+### 5. Rebuild the non-learned OOF components
 
 ```bash
 uv run python -m scripts.build_naive
 uv run python -m scripts.build_nonexp
 ```
 
-Each component produces source-specific fold models and OOF predictions under:
+At this point all six member components have source-specific models or state plus OOF predictions under:
 
 ```text
 artifacts/snapshots/<SOURCE>/predictors/
 ```
 
-### 6. Train the LTR ensemble and generate predictions
+### 6. Train the LTR ensemble
 
-Train LTR only after all six member components and their OOF predictions exist:
+Train LTR only after all six OOF member predictions exist:
 
 ```bash
 uv run python -m scripts.train_ltr
+```
+
+No test inference is required to train the source snapshot.
+
+### 7. Predict an evaluation target set
+
+For a released retrospective window, run every component only on the proteins in that window's `groundtruth_targets.tsv`. Keep predictions outside the source-training directory so multiple future windows can coexist.
+
+Example for `Dec_2025 -> Mar_2026`:
+
+```bash
+TARGETS="$HOME/tools/CAFA_forever/data/releases/Dec_2025_Mar_2026/groundtruth_targets.tsv"
+PREDICTION_WORK="$PWD/artifacts/predictions/Dec_2025_to_Mar_2026"
+
+uv run python -m scripts.predict --targets "$TARGETS" --prediction-work "$PREDICTION_WORK"
+```
+
+This runs HMLP, MLP, PyBoost, BLAST-KNN, naive prior, non-experimental features, and LTR only for the requested EntryIDs. The trained source models and OOF files are reused unchanged.
+
+To run production-style inference for the complete current query FASTA, omit `--targets` and `--prediction-work`:
+
+```bash
 uv run python -m scripts.predict
 ```
-This generates test predictions for the component models as needed and writes the final ensemble prediction to:
 
-```text
-artifacts/snapshots/<SOURCE>/final/submission.tsv
+The full-query mode writes the traditional component submit files under the source work directory and `final/submission.tsv`.
+
+### 8. Score a target-set prediction
+
+When predictions were written to a separate prediction work directory, pass it explicitly to the scorer:
+
+```bash
+uv run python -m scripts.score_eval \
+  --groundtruth-dir "$HOME/tools/CAFA_forever/data/releases/Dec_2025_Mar_2026" \
+  --source-work "$PWD/artifacts/snapshots/Dec_2025" \
+  --prediction-work "$PWD/artifacts/predictions/Dec_2025_to_Mar_2026" \
+  --source-snapshot Dec_2025 \
+  --future-snapshot Mar_2026 \
+  --output "$PWD/artifacts/evaluation/Dec_2025_to_Mar_2026"
 ```
+
+`--source-work` supplies the frozen source ontology, IA, and training artifacts. `--prediction-work` supplies only the predictions for the selected evaluation targets.
 
 ### Retraining schedule
 
