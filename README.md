@@ -351,3 +351,7 @@ Immutable image: `tochka897/lafa@sha256:2331e556d07e331f18efc92ba23dbd9a0a7928e9
 Precomputed protein embeddings: [AnDolgorukova/lafa-protein-embeddings](https://huggingface.co/datasets/AnDolgorukova/lafa-protein-embeddings).
 
 Runtime mounts, pretrained protein-language-model preparation, and the complete container command are documented in `CONTAINER.md`.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
