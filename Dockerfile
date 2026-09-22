@@ -5,8 +5,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON=3.12 \
-    HF_HOME=/root/.cache/huggingface \
-    TORCH_HOME=/root/.cache/torch \
+    HF_HOME=/models/huggingface \
+    TORCH_HOME=/models/torch \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false
@@ -28,7 +28,7 @@ COPY config.py ./
 COPY src ./src
 COPY scripts ./scripts
 
-RUN mkdir -p /data /embeddings /work /root/.cache/huggingface /root/.cache/torch
+RUN mkdir -p /data /embeddings /work /models/huggingface /models/torch
 
 ENV PATH="/app/.venv/bin:$PATH"
 
